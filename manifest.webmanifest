@@ -1,0 +1,25 @@
+{
+  "name": "Palet Notlar",
+  "short_name": "Palet",
+  "description": "Renkli notlar, yapılacaklar listeleri ve hatırlatıcılar",
+  "lang": "tr",
+  "dir": "ltr",
+  "id": "./",
+  "start_url": "./#/notes",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#EEF0EC",
+  "theme_color": "#EEF0EC",
+  "categories": ["productivity"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ],
+  "shortcuts": [
+    { "name": "Yeni not", "url": "./#/notes", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Takvim", "url": "./#/calendar", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}
