@@ -479,6 +479,7 @@ function openEditor(id) {
 function renderEditor() {
   const n = state.editing;
   ed.root.style.setProperty('--c', `var(--n-${n.color})`);
+  syncStatusBar();
   ed.pin.setAttribute('aria-pressed', String(n.pinned));
   ed.pin.setAttribute('aria-label', n.pinned ? 'Sabitlemeyi kaldır' : 'Sabitle');
   ed.pin.innerHTML = icon(n.pinned ? 'pin-fill' : 'pin');
@@ -552,6 +553,7 @@ function closeEditor() {
   state.openedFromApp = false;
   ed.root.hidden = true;
   document.body.style.overflow = '';
+  syncStatusBar();
   scheduleReminders();
 }
 
@@ -781,8 +783,14 @@ function applyTheme() {
   const t = state.prefs.theme;
   if (t === 'system') delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = t;
-  const dark = t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
-  document.querySelector('meta[name="theme-color"]').content = dark ? '#15181D' : '#EEF0EC';
+  syncStatusBar();
+}
+// The status bar takes the colour at the top of the screen: the page background,
+// or the open note's colour while the editor covers everything.
+function syncStatusBar() {
+  const token = state.editing ? `--n-${state.editing.color}` : '--bg';
+  const color = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+  if (color) document.querySelector('meta[name="theme-color"]').content = color;
 }
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', applyTheme);
 

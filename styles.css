@@ -7,6 +7,7 @@
   --muted: #5D6573;
   --line: #D3D7CF;
   --hover: rgba(30, 36, 48, .07);
+  --press: rgba(30, 36, 48, .13);
   --focus: #2F5BD3;
   --danger: #B42318;
   --backdrop: rgba(14, 18, 26, .45);
@@ -38,6 +39,8 @@
     --muted: #9BA2AD;
     --line: #333A43;
     --hover: rgba(232, 234, 228, .08);
+  --press: rgba(232, 234, 228, .15);
+    --press: rgba(232, 234, 228, .15);
     --focus: #8DA9F5;
     --danger: #F97066;
     --backdrop: rgba(0, 0, 0, .6);
@@ -76,7 +79,11 @@
 
 /* Base */
 *, *::before, *::after { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent; /* our own :active states give the feedback */
+  overscroll-behavior: none;                /* no pull-to-refresh tearing the app away */
+}
 body {
   margin: 0;
   min-height: 100dvh;
@@ -84,11 +91,13 @@ body {
   color: var(--ink);
   font: 400 16px/1.45 var(--font);
   font-optical-sizing: auto;
-  -webkit-tap-highlight-color: transparent;
   overflow-x: hidden;
 }
 button, input, textarea, select { font: inherit; color: inherit; }
 button { cursor: pointer; background: none; border: 0; padding: 0; }
+/* Controls fire on tap without the double-tap wait, and a long press doesn't select their label */
+button, a, [role="button"], label { touch-action: manipulation; }
+button, [role="button"] { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
 [hidden] { display: none !important; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -102,7 +111,6 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
   width: 44px; height: 44px; border-radius: 12px; flex: none;
   color: var(--ink);
 }
-.icon-btn:hover { background: var(--hover); }
 .icon-btn[aria-pressed="true"] { background: var(--hover); }
 
 .btn {
@@ -111,7 +119,6 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
   font-weight: 600; font-size: 15px;
 }
 .btn.primary { background: var(--ink); color: var(--bg); }
-.btn.ghost:hover { background: var(--hover); }
 .btn.danger { background: var(--danger); color: #fff; }
 .btn.outline { border: 1.5px solid var(--ink); }
 .danger-text { color: var(--danger); }
@@ -150,7 +157,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
   border: 1px solid color-mix(in oklab, var(--c), var(--ink) 16%);
   display: flex; align-items: center; justify-content: center;
   font-size: 13px; font-weight: 600; color: color-mix(in oklab, var(--ink) 75%, transparent);
-  transition: opacity var(--dur) var(--ease), flex-grow 320ms var(--ease);
+  transition: opacity var(--dur) var(--ease), flex-grow 320ms var(--ease), transform 120ms var(--ease);
 }
 .palette.filtering .seg[aria-pressed="false"] { opacity: .32; }
 .seg[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 2px; }
@@ -182,7 +189,6 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 }
 .notes.rows .card { margin: 0; }
 .card-hit { position: absolute; inset: 0; border-radius: 10px; z-index: 1; }
-.card-hit:hover { background: var(--hover); }
 .card > :not(.card-hit) { position: relative; pointer-events: none; }
 .card-pin { position: absolute !important; top: 10px; right: 10px; width: 18px; height: 18px; opacity: .7; }
 .card-title {
@@ -273,7 +279,6 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
   display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 4px;
   padding-top: 6px; font-size: 15px; font-variant-numeric: tabular-nums;
 }
-.cal-day:hover { background: var(--hover); }
 .cal-day .num { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; }
 .cal-day.today .num { background: var(--ink); color: var(--bg); font-weight: 600; }
 .cal-day[aria-pressed="true"] { background: var(--surface); outline: 1.5px solid var(--ink); outline-offset: -1.5px; }
@@ -337,7 +342,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 }
 .item.done .item-text { text-decoration: line-through; color: color-mix(in oklab, var(--ink) 55%, transparent); }
 .item-del { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; opacity: .55; }
-.item-del:hover, .item-del:focus-visible { opacity: 1; background: var(--hover); }
+.item-del:focus-visible { opacity: 1; background: var(--hover); }
 .item-del .icon { width: 18px; height: 18px; }
 .add-item {
   display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 4px 0 6px;
@@ -381,7 +386,6 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 .dlg-actions { display: flex; align-items: center; gap: 4px; margin-top: 16px; flex-wrap: wrap; }
 .quick { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
 .pill { min-height: 38px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line); font-size: 14px; font-weight: 500; }
-.pill:hover { background: var(--hover); }
 .field-label { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
 .field { height: 46px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); font-size: 16px; }
 .field:focus { outline: 2px solid var(--focus); outline-offset: 0; border-color: transparent; }
@@ -398,7 +402,6 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
   display: flex; align-items: center; gap: 14px; min-height: 50px; padding: 0 12px; border-radius: 10px;
   text-align: left; font-size: 16px;
 }
-.sheet-item:hover { background: var(--hover); }
 .sheet-item .icon { color: var(--muted); }
 .sheet-item.danger, .sheet-item.danger .icon { color: var(--danger); }
 .sheet-item .tick { margin-left: auto; color: var(--ink); }
@@ -414,6 +417,25 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 }
 .toast.in-editor { bottom: calc(var(--safe-b) + 108px); }
 #toast-act { flex: none; white-space: nowrap; font-weight: 700; color: var(--n-yellow); min-height: 32px; padding: 0 6px; }
+
+/* Press feedback lands on finger-down, not on release */
+.btn, .fab, .swatch, .check span { transition: transform 120ms var(--ease), background-color 120ms var(--ease); }
+.icon-btn:active, .btn.ghost:active, .pill:active, .sheet-item:active,
+.card-hit:active, .cal-day:active, .item-del:active, .add-item:active { background: var(--press); }
+.item-del:active { opacity: 1; }
+.btn.primary:active, .btn.danger:active, .btn.outline:active, .fab:active, .swatch:active, .seg:active { transform: scale(.96); }
+.check:active span { transform: scale(.88); }
+.tab:active .icon { background: var(--press); }
+.tab[aria-current="page"]:active .icon { background: color-mix(in oklab, var(--n-yellow), var(--ink) 14%); }
+
+/* Hover only where a real pointer can hover; on touch it would stick after a tap */
+@media (hover: hover) and (pointer: fine) {
+  .icon-btn:hover, .btn.ghost:hover, .card-hit:hover, .cal-day:hover,
+  .pill:hover, .sheet-item:hover { background: var(--hover); }
+  .item-del:hover { opacity: 1; background: var(--hover); }
+  .icon-btn:active, .btn.ghost:active, .pill:active, .sheet-item:active,
+  .card-hit:active, .cal-day:active, .item-del:active { background: var(--press); }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

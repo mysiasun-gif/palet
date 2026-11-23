@@ -1,5 +1,5 @@
 // Palet service worker: offline app shell, cached fonts, reminder notification clicks.
-const VERSION = 'palet-v1';
+const VERSION = 'palet-v2';
 const SHELL = [
   './',
   './index.html',
