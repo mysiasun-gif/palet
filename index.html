@@ -5,13 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>Palet</title>
 <meta name="description" content="Renkli notlar, yapılacaklar listeleri ve hatırlatıcılar">
-<meta name="theme-color" content="#EEF0EC">
+<meta name="theme-color" content="#FAF6EA">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;600;700&family=Quicksand:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -44,6 +44,18 @@
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2"/><path d="M15.5 8.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7.5a2 2 0 0 0 2 2h2.5"/></symbol>
     <symbol id="i-share" viewBox="0 0 24 24"><path d="M12 3.5v11.5M8 7.5l4-4 4 4M5 12v7.5h14V12"/></symbol>
     <symbol id="i-sort" viewBox="0 0 24 24"><path d="M7 4v16M4 17l3 3 3-3M17 20V4M14 7l3-3 3 3"/></symbol>
+    <!-- Desk props: drawn in their own colours, not currentColor -->
+    <symbol id="d-pushpin" viewBox="0 0 34 44">
+      <ellipse cx="20" cy="40" rx="6" ry="1.8" fill="rgba(40,25,0,.22)"/>
+      <path d="M17 20 19.5 38.5" stroke="#8C8E93" stroke-width="2.2" stroke-linecap="round"/>
+      <path d="M8 19.5c2.6 2.6 15.4 2.6 18 0l-3-4.5h-12z" fill="#B8323A"/>
+      <circle cx="17" cy="11" r="9.5" fill="#E4484F"/>
+      <ellipse cx="13.6" cy="7.6" rx="3.4" ry="2.6" fill="#fff" opacity=".5"/>
+    </symbol>
+    <symbol id="d-clip" viewBox="0 0 22 56">
+      <path d="M7 18v25a4.5 4.5 0 0 0 9 0V12a7.5 7.5 0 0 0-15 0v31" fill="none" stroke="#8E97A3" stroke-width="2.6" stroke-linecap="round"/>
+      <path d="M7 18v25a4.5 4.5 0 0 0 9 0V12" fill="none" stroke="#C9D0D8" stroke-width="1" stroke-linecap="round" opacity=".8"/>
+    </symbol>
     <symbol id="i-install" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M12 7.5v6.5M9.5 11.5L12 14l2.5-2.5"/></symbol>
   </defs>
 </svg>
@@ -52,17 +64,17 @@
   <header class="topbar">
     <div class="topbar-row">
       <h1 id="view-title" class="view-title">Notlar</h1>
-      <button id="search-btn" class="icon-btn" type="button" aria-label="Notlarda ara" aria-expanded="false"><svg class="icon"><use href="#i-search"/></svg></button>
-      <button id="menu-btn" class="icon-btn" type="button" aria-label="Görünüm ve yedek seçenekleri"><svg class="icon"><use href="#i-more"/></svg></button>
+      <button id="menu-btn" class="icon-btn ring" type="button" aria-label="Görünüm ve yedek seçenekleri"><svg class="icon"><use href="#i-more"/></svg></button>
     </div>
-    <div id="search-row" class="search-row" hidden>
+    <div id="search-row" class="search-row">
       <label class="search-field">
-        <span class="visually-hidden">Ara</span>
-        <svg class="icon"><use href="#i-search"/></svg>
-        <input id="search-input" type="search" placeholder="Başlıkta, metinde ya da listede ara" autocomplete="off" enterkeyhint="search">
+        <span class="visually-hidden">Notlarda ara</span>
+        <input id="search-input" type="search" placeholder="Notlarda ara" autocomplete="off" enterkeyhint="search">
+        <button id="search-close" class="clear-btn" type="button" aria-label="Aramayı temizle" hidden><svg class="icon"><use href="#i-close"/></svg></button>
+        <svg class="icon search-icon" aria-hidden="true"><use href="#i-search"/></svg>
       </label>
-      <button id="search-close" class="icon-btn" type="button" aria-label="Aramayı kapat"><svg class="icon"><use href="#i-close"/></svg></button>
     </div>
+    <div id="kinds" class="kinds" role="group" aria-label="Türe göre filtrele"></div>
     <div id="palette" class="palette" role="group" aria-label="Renge göre filtrele"></div>
   </header>
 
@@ -73,6 +85,7 @@
   <nav class="tabs" aria-label="Bölümler">
     <button class="tab" type="button" data-view="notes"><svg class="icon"><use href="#i-notes"/></svg><span>Notlar</span></button>
     <button class="tab" type="button" data-view="calendar"><svg class="icon"><use href="#i-calendar"/></svg><span>Takvim</span></button>
+    <span class="tab-gap" aria-hidden="true"></span>
     <button class="tab" type="button" data-view="archive"><svg class="icon"><use href="#i-archive"/></svg><span>Arşiv</span></button>
     <button class="tab" type="button" data-view="trash"><svg class="icon"><use href="#i-trash"/></svg><span>Çöp kutusu</span></button>
   </nav>
@@ -80,7 +93,7 @@
 
 <section id="editor" class="editor" hidden aria-label="Not">
   <header class="ed-bar">
-    <button id="ed-back" class="icon-btn" type="button" aria-label="Notu kaydet ve kapat"><svg class="icon"><use href="#i-back"/></svg></button>
+    <button id="ed-back" class="icon-btn ring" type="button" aria-label="Notu kaydet ve kapat"><svg class="icon"><use href="#i-back"/></svg></button>
     <span class="grow"></span>
     <button id="ed-pin" class="icon-btn" type="button" aria-label="Sabitle" aria-pressed="false"><svg class="icon"><use href="#i-pin"/></svg></button>
     <button id="ed-remind" class="icon-btn" type="button" aria-label="Hatırlatıcı kur"><svg class="icon"><use href="#i-bell"/></svg></button>
@@ -89,6 +102,7 @@
   </header>
   <div class="ed-scroll">
     <div class="ed-inner">
+      <span class="ed-tape" aria-hidden="true"></span>
       <input id="ed-title" class="ed-title" type="text" placeholder="Başlık" aria-label="Başlık" autocomplete="off" enterkeyhint="next">
       <button id="ed-chip" class="chip" type="button" hidden></button>
       <textarea id="ed-body" class="ed-body" placeholder="Not" aria-label="Not metni" rows="6"></textarea>

@@ -23,6 +23,8 @@ const SORTS = {
   color: 'Renge göre',
   reminder: 'Hatırlatıcı tarihine göre',
 };
+const KINDS = { all: 'Hepsi', text: 'Notlar', list: 'Listeler', reminder: 'Hatırlatıcılı' };
+const TAPES = ['#F4A6BD', '#F6B26B', '#8FD9C0', '#BBA7EE', '#F3D46B'];
 const THEMES = { system: 'Sistem ayarı', light: 'Açık', dark: 'Koyu' };
 const TRASH_DAYS = 30;
 const DAY = 86400000;
@@ -114,6 +116,7 @@ const state = {
   pending: null,          // a new note that has not been saved yet
   view: 'notes',
   filterColor: null,
+  kind: 'all',
   query: '',
   editing: null,
   openedFromApp: false,
@@ -243,6 +246,7 @@ function onRoute() {
   if (r.view !== state.view) {
     state.view = r.view;
     state.filterColor = null;
+    state.kind = 'all';
     window.scrollTo(0, 0);
   }
   render();
@@ -280,12 +284,23 @@ function sortNotes(list) {
   return list.sort(cmp);
 }
 
+// Stable per-note "randomness" so a note keeps its tilt and tape between renders.
+function hashStr(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function matchesKind(n) {
+  const k = state.kind;
+  return k === 'all' || (k === 'reminder' ? !!n.reminderAt : n.type === k);
+}
+
 function cardHtml(n) {
   let preview = '';
   if (n.type === 'list') {
     const open = n.items.filter(i => !i.done && i.text.trim());
     const done = n.items.filter(i => i.done && i.text.trim());
-    const shown = open.slice(0, 6);
+    const shown = open.slice(0, 5);
     const extraOpen = open.length - shown.length;
     preview = `<ul class="card-list">${shown.map(i => `<li><span class="box"></span><span>${esc(i.text)}</span></li>`).join('')}</ul>`;
     const bits = [];
@@ -293,21 +308,30 @@ function cardHtml(n) {
     if (done.length) bits.push(`${done.length} tamamlandı`);
     if (bits.length) preview += `<p class="card-more">${bits.join(', ')}</p>`;
   } else if (n.body.trim()) {
-    preview = `<p class="card-body">${esc(n.body.slice(0, 600))}</p>`;
+    preview = `<p class="card-body">${esc(n.body.slice(0, 400))}</p>`;
   }
   const meta = [];
   if (n.reminderAt && !n.deletedAt) {
     const past = n.reminderAt < Date.now();
-    meta.push(`<span class="meta-chip${past ? ' past' : ''}">${icon('bell')}${esc(whenLabel(n.reminderAt))}</span>`);
+    meta.push(`<span class="card-when${past ? ' past' : ''}">${icon('bell')}${esc(whenLabel(n.reminderAt))}</span>`);
   }
   if (n.deletedAt) {
     const left = Math.max(0, Math.ceil((n.deletedAt + TRASH_DAYS * DAY - Date.now()) / DAY));
-    meta.push(`<span class="meta-chip">${left} gün sonra silinecek</span>`);
+    meta.push(`<span class="card-when">${left} gün sonra silinecek</span>`);
   }
   const showPin = n.pinned && !n.deletedAt;
-  return `<article class="card" style="--c:var(--n-${n.color})">
-    <button class="card-hit" type="button" data-open="${esc(n.id)}" aria-label="${esc(noteLabel(n))}, ${colorName(n.color)} not${n.pinned ? ', sabitlenmiş' : ''}"></button>
-    ${showPin ? icon('pin-fill', 'card-pin') : ''}
+  // What holds the note up says what kind it is: a pushpin for pinned notes,
+  // a paper clip for lists, a strip of tape for everything else.
+  const h = hashStr(n.id);
+  const tilt = ((h % 61) / 10 - 3).toFixed(1);
+  const hold = showPin ? 'pin' : n.type === 'list' ? 'clip' : 'tape';
+  const curl = (h >>> 8) % 3 === 0 ? ' curl' : '';
+  const holder = hold === 'pin' ? '<svg class="holder pin" aria-hidden="true"><use href="#d-pushpin"/></svg>'
+    : hold === 'clip' ? '<svg class="holder clip" aria-hidden="true"><use href="#d-clip"/></svg>'
+      : `<span class="holder tape" aria-hidden="true" style="--tape:${TAPES[(h >>> 4) % TAPES.length]};--tape-tilt:${((h >>> 12) % 9) - 4}deg"></span>`;
+  return `<article class="card${curl}" data-hold="${hold}" style="--c:var(--n-${n.color});--tilt:${tilt}deg">
+    <button class="card-hit" type="button" data-open="${esc(n.id)}" aria-label="${esc(noteLabel(n))}, ${colorName(n.color)} not${n.pinned ? ', sabitlenmiş' : ''}${n.type === 'list' ? ', liste' : ''}"></button>
+    ${holder}
     ${n.title.trim() ? `<h3 class="card-title">${esc(n.title)}</h3>` : ''}
     ${preview || (n.title.trim() ? '' : '<p class="card-body">Boş not</p>')}
     ${meta.length ? `<div class="card-meta">${meta.join('')}</div>` : ''}
@@ -316,12 +340,15 @@ function cardHtml(n) {
 const notesBlock = list => `<div class="notes ${state.prefs.layout === 'rows' ? 'rows' : 'grid'}">${list.map(cardHtml).join('')}</div>`;
 
 function emptyArt(colors) {
-  return `<div class="empty-art" aria-hidden="true">${colors.map(c => `<span style="--c:var(--n-${c})"></span>`).join('')}</div>`;
+  return `<div class="empty-art" aria-hidden="true">${colors.map((c, i) => `<span style="--c:var(--n-${c});--i:${i - (colors.length - 1) / 2}"></span>`).join('')}</div>`;
 }
 function emptyHtml(scoped) {
   const v = state.view;
   if (state.query) {
     return `<div class="empty">${emptyArt(['gray'])}<h2>Sonuç yok</h2><p>“${esc(state.query)}” hiçbir notta geçmiyor${v === 'notes' ? '' : ` (${VIEWS[v].toLocaleLowerCase('tr')})`}. Arşivi ya da çöp kutusunu da kontrol edebilirsin.</p><button class="btn outline" type="button" data-act="clear-search">Aramayı temizle</button></div>`;
+  }
+  if (state.kind !== 'all' && scoped.length && !state.filterColor) {
+    return `<div class="empty">${emptyArt(['green'])}<h2>Burada ${KINDS[state.kind].toLocaleLowerCase('tr')} not yok</h2><p>${state.kind === 'reminder' ? 'Bir notta zil simgesine dokunarak hatırlatıcı kurabilirsin.' : state.kind === 'list' ? 'Bir notu listeye çevirmek için notun menüsünü kullan.' : 'Bu bölümdeki notların hepsi liste.'}</p><button class="btn outline" type="button" data-act="clear-kind">Hepsini göster</button></div>`;
   }
   if (state.filterColor && scoped.length) {
     return `<div class="empty">${emptyArt([state.filterColor])}<h2>${colorName(state.filterColor)} not yok</h2><p>Bu bölümde bu renkte not bulunmuyor.</p><button class="btn outline" type="button" data-act="clear-filter">Tüm renkleri göster</button></div>`;
@@ -337,21 +364,26 @@ function emptyHtml(scoped) {
 
 function renderPalette() {
   const el = $('#palette');
-  if (state.view === 'calendar') { el.hidden = true; return; }
-  el.hidden = false;
+  const kinds = $('#kinds');
+  const isCal = state.view === 'calendar';
+  el.hidden = kinds.hidden = isCal;
+  if (isCal) return;
+  const scoped = scopeNotes(state.view);
+  kinds.innerHTML = Object.entries(KINDS).map(([k, label]) =>
+    `<button class="kind" type="button" data-kind="${k}" aria-pressed="${state.kind === k}">${label}</button>`).join('');
   const counts = Object.fromEntries(COLOR_IDS.map(c => [c, 0]));
-  scopeNotes(state.view).forEach(n => { counts[n.color]++; });
+  scoped.forEach(n => { counts[n.color]++; });
   el.classList.toggle('filtering', !!state.filterColor);
   el.innerHTML = COLORS.map(c => {
     const n = counts[c.id];
-    return `<button class="seg" type="button" style="--c:var(--n-${c.id});flex-grow:${n + 1}" data-color="${c.id}" aria-pressed="${state.filterColor === c.id}" aria-label="${c.name}: ${n} not">${n ? `<span aria-hidden="true">${n}</span>` : ''}</button>`;
+    return `<button class="seg${n ? '' : ' none'}" type="button" style="--c:var(--n-${c.id})" data-color="${c.id}" aria-pressed="${state.filterColor === c.id}" aria-label="${c.name}: ${n} not">${n ? `<span aria-hidden="true">${n}</span>` : ''}</button>`;
   }).join('');
 }
 
 function renderList(main) {
   const scoped = scopeNotes(state.view);
   const q = lower(state.query.trim());
-  const list = sortNotes(scoped.filter(n => (!state.filterColor || n.color === state.filterColor) && matches(n, q)));
+  const list = sortNotes(scoped.filter(n => (!state.filterColor || n.color === state.filterColor) && matchesKind(n) && matches(n, q)));
   let html = '';
   if (state.filterColor) {
     html += `<div class="filter-note"><span class="dot" style="--c:var(--n-${state.filterColor})"></span><span>Yalnızca ${colorName(state.filterColor).toLocaleLowerCase('tr')} notlar</span><button class="link-btn" type="button" data-act="clear-filter">Tümünü göster</button></div>`;
@@ -429,8 +461,7 @@ function render() {
     if (t.dataset.view === state.view) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
   });
   const isCal = state.view === 'calendar';
-  $('#search-btn').hidden = isCal;
-  if (isCal) $('#search-row').hidden = true;
+  $('#search-row').hidden = isCal;
   $('#fab').hidden = state.view === 'trash' || state.view === 'archive';
   renderPalette();
   const main = $('#view');
@@ -831,23 +862,27 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
 $('#fab').addEventListener('click', newNote);
 $('#menu-btn').addEventListener('click', mainMenu);
 
-function openSearch() {
-  $('#search-row').hidden = false;
-  $('#search-btn').setAttribute('aria-expanded', 'true');
-  $('#search-input').focus();
-}
+function openSearch() { $('#search-input').focus(); }
 function closeSearch() {
-  $('#search-row').hidden = true;
-  $('#search-btn').setAttribute('aria-expanded', 'false');
   $('#search-input').value = '';
+  $('#search-close').hidden = true;
   state.query = '';
   render();
 }
-$('#search-btn').addEventListener('click', () => ($('#search-row').hidden ? openSearch() : closeSearch()));
-$('#search-close').addEventListener('click', closeSearch);
-$('#search-input').addEventListener('input', e => { state.query = e.target.value; renderList($('#view')); });
+$('#search-close').addEventListener('click', () => { closeSearch(); $('#search-input').focus(); });
+$('#search-input').addEventListener('input', e => {
+  state.query = e.target.value;
+  $('#search-close').hidden = !state.query;
+  renderList($('#view'));
+});
 $('#search-input').addEventListener('keydown', e => { if (e.key === 'Escape') closeSearch(); });
 
+$('#kinds').addEventListener('click', e => {
+  const k = e.target.closest('[data-kind]')?.dataset.kind;
+  if (!k || k === state.kind) return;
+  state.kind = k;
+  render();
+});
 $('#palette').addEventListener('click', e => {
   const c = e.target.closest('[data-color]')?.dataset.color;
   if (!c) return;
@@ -870,6 +905,7 @@ $('#view').addEventListener('click', async e => {
   if (act === 'new') newNote();
   if (act === 'clear-filter') { state.filterColor = null; render(); }
   if (act === 'clear-search') closeSearch();
+  if (act === 'clear-kind') { state.kind = 'all'; render(); }
   if (act === 'cal-prev' || act === 'cal-next') {
     const m = state.calMonth;
     state.calMonth = new Date(m.getFullYear(), m.getMonth() + (act === 'cal-next' ? 1 : -1), 1);
