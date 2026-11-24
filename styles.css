@@ -119,6 +119,13 @@ button, [role="button"] { user-select: none; -webkit-user-select: none; -webkit-
 
 .topbar { padding-top: calc(var(--safe-t) + 14px); padding-bottom: 6px; }
 .topbar-row { display: flex; align-items: center; gap: 8px; min-height: 52px; }
+/* Brand: the app icon, small and quiet, never competing with the notes */
+.brand-logo { flex: none; width: 40px; height: 40px; margin-left: -4px; }
+.rail-brand { display: none; }
+.sheet-brand { display: flex; align-items: center; gap: 10px; margin: 2px 14px 10px; }
+.sheet-brand img { width: 44px; height: 44px; }
+.rail-brand span, .sheet-brand span { font-family: var(--hand); font-weight: 700; line-height: 1; }
+.sheet-brand span { font-size: 30px; color: var(--ink); }
 .view-title {
   flex: 1; margin: 0;
   font-size: 38px; line-height: 1.05; font-weight: 600; letter-spacing: -.025em;
@@ -305,10 +312,15 @@ body:has(#fab[hidden]) .tab-gap { display: none; }
 @media (min-width: 900px) {
   .app { padding-left: 124px; padding-bottom: 120px; }
   .tabs {
-    top: 0; right: auto; width: 100px; height: auto; padding: calc(var(--safe-t) + 110px) 0 0;
+    top: 0; right: auto; width: 100px; height: auto; padding: calc(var(--safe-t) + 18px) 0 0;
     display: flex; flex-direction: column; gap: 10px;
     border-radius: 0 32px 32px 0;
   }
+  /* On the wide layout the rail carries the name; the top bar drops its copy */
+  .brand-logo { display: none; }
+  .rail-brand { display: flex; flex-direction: column; align-items: center; gap: 6px; height: 82px; }
+  .rail-brand img { width: 52px; height: 52px; }
+  .rail-brand span { font-size: 24px; color: var(--bar-ink); }
   .tab-gap { display: none; }
   .tab { height: 64px; flex: none; font-size: 12.5px; }
   .fab { left: auto; translate: none; right: 32px; bottom: 32px; box-shadow: 0 12px 22px -8px rgba(40, 30, 10, .5); }

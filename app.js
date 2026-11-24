@@ -211,8 +211,9 @@ function toast(msg, action) {
 function hideToast() { $('#toast').hidden = true; }
 
 /* ---------- Dialog helpers ---------- */
-function showSheet(title, items) {
+function showSheet(title, items, { brand = false } = {}) {
   const dlg = $('#dlg-sheet');
+  $('#sheet-brand').hidden = !brand;
   $('#sheet-title').textContent = title;
   const box = $('#sheet-items');
   box.innerHTML = '';
@@ -872,7 +873,7 @@ function mainMenu() {
       icon: 'install', label: 'Uygulamayı ana ekrana ekle',
       run: async () => { const ev = installPrompt; installPrompt = null; await ev.prompt(); },
     },
-  ]);
+  ], { brand: true });
 }
 function sortMenu() {
   showSheet('Sırala', Object.entries(SORTS).map(([k, label]) => ({

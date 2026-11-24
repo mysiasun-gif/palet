@@ -64,6 +64,7 @@
 <div class="app">
   <header class="topbar">
     <div class="topbar-row">
+      <img class="brand-logo" src="icons/logo.png" alt="" width="40" height="40">
       <h1 id="view-title" class="view-title">Notlar</h1>
       <button id="menu-btn" class="icon-btn ring" type="button" aria-label="Görünüm ve yedek seçenekleri"><svg class="icon"><use href="#i-more"/></svg></button>
     </div>
@@ -84,6 +85,7 @@
   <button id="fab" class="fab" type="button" aria-label="Yeni not"><svg class="icon"><use href="#i-plus"/></svg></button>
 
   <nav class="tabs" aria-label="Bölümler">
+    <div class="rail-brand"><img src="icons/logo.png" alt="" width="52" height="52"><span>TakJot</span></div>
     <button class="tab" type="button" data-view="notes"><svg class="icon"><use href="#i-notes"/></svg><span>Notlar</span></button>
     <button class="tab" type="button" data-view="calendar"><svg class="icon"><use href="#i-calendar"/></svg><span>Takvim</span></button>
     <span class="tab-gap" aria-hidden="true"></span>
@@ -151,6 +153,7 @@
 
 <dialog id="dlg-sheet" class="dlg sheet">
   <form method="dialog" class="sheet-form">
+    <div id="sheet-brand" class="sheet-brand" hidden><img src="icons/logo.png" alt="" width="44" height="44"><span>TakJot</span></div>
     <h2 id="sheet-title" class="sheet-title"></h2>
     <div id="sheet-items" class="sheet-items"></div>
   </form>
