@@ -719,9 +719,9 @@ async function fireReminder(n) {
 }
 
 function reminderHint() {
-  if (!('Notification' in window)) return 'Bu tarayıcı bildirim göstermiyor. Hatırlatıcı, Palet açıkken ekranda görünür.';
-  if (Notification.permission === 'denied') return 'Bildirim izni kapalı. Hatırlatıcı, Palet açıkken ekranda görünür. İzni tarayıcının site ayarlarından açabilirsin.';
-  return 'Bildirim, Palet açıkken gelir. Kapalıyken kaçan hatırlatıcılar uygulamayı açtığında gösterilir.';
+  if (!('Notification' in window)) return 'Bu tarayıcı bildirim göstermiyor. Hatırlatıcı, TakJot açıkken ekranda görünür.';
+  if (Notification.permission === 'denied') return 'Bildirim izni kapalı. Hatırlatıcı, TakJot açıkken ekranda görünür. İzni tarayıcının site ayarlarından açabilirsin.';
+  return 'Bildirim, TakJot açıkken gelir. Kapalıyken kaçan hatırlatıcılar uygulamayı açtığında gösterilir.';
 }
 
 function openReminderDialog() {
@@ -777,7 +777,7 @@ function exportBackup() {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `palet-yedek-${dayKey(Date.now())}.json`;
+  a.download = `takjot-yedek-${dayKey(Date.now())}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -805,7 +805,7 @@ $('#import-file').addEventListener('change', async e => {
     scheduleReminders();
     toast(added || updated ? `${added} not eklendi, ${updated} not güncellendi` : 'Yedekteki notların hepsi zaten burada');
   } catch {
-    toast('Bu dosya okunamadı. Palet’ten indirilen bir .json yedek dosyası seç.');
+    toast('Bu dosya okunamadı. TakJot’tan indirilen bir .json yedek dosyası seç.');
   }
 });
 
@@ -828,7 +828,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', applyThe
 /* ---------- Install ---------- */
 let installPrompt = null;
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; });
-window.addEventListener('appinstalled', () => { installPrompt = null; toast('Palet ana ekrana eklendi'); });
+window.addEventListener('appinstalled', () => { installPrompt = null; toast('TakJot ana ekrana eklendi'); });
 
 function mainMenu() {
   const p = state.prefs;
