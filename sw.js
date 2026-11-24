@@ -1,10 +1,11 @@
 // Palet service worker: offline app shell, cached fonts, reminder notification clicks.
-const VERSION = 'palet-v7';
+const VERSION = 'palet-v8';
 const SHELL = [
   './',
   './index.html',
   './styles.css',
   './app.js',
+  './cloud.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -12,6 +13,8 @@ const SHELL = [
   './icons/logo.png',
 ];
 const FONT_CACHE = 'palet-fonts';
+// Google sign-in and Drive: always straight to the network, never cached.
+const GOOGLE_HOSTS = ['accounts.google.com', 'apis.google.com', 'www.googleapis.com'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -27,8 +30,9 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   const req = event.request;
-  if (req.method !== 'GET') return;
   const url = new URL(req.url);
+  if (GOOGLE_HOSTS.includes(url.hostname)) return;
+  if (req.method !== 'GET') return;
 
   if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
     event.respondWith((async () => {

@@ -498,6 +498,57 @@ body:has(#fab[hidden]) .tab-gap { display: none; }
 .sheet-item.danger, .sheet-item.danger .icon { color: var(--danger); }
 .sheet-item .tick { margin-left: auto; color: var(--ink); }
 
+/* Sheet rows with a second line, an info box and a switch */
+.sheet-item.has-sub { min-height: 60px; padding-block: 6px; }
+.sheet-label { display: flex; flex-direction: column; min-width: 0; }
+.sheet-sub { font-size: 13.5px; font-weight: 500; color: var(--muted); overflow-wrap: anywhere; }
+.sheet-sub.pending { color: var(--ink); font-weight: 700; }
+.sheet-sub.pending::before {
+  content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%;
+  background: var(--focus); vertical-align: 1px;
+}
+.sheet-info {
+  display: flex; align-items: center; gap: 12px; margin: 0 4px 8px; padding: 12px 14px;
+  border-radius: 16px; background: var(--bg); border: 1px solid var(--line);
+}
+.sheet-info .icon { color: var(--muted); }
+.sheet-info span { display: flex; flex-direction: column; min-width: 0; }
+.sheet-info small { font-size: 13px; font-weight: 600; color: var(--muted); }
+.sheet-info b { font-weight: 700; overflow-wrap: anywhere; }
+.switch {
+  position: relative; flex: none; margin-left: auto; width: 44px; height: 26px; border-radius: 999px;
+  background: var(--line); transition: background-color var(--dur) var(--ease);
+}
+.switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--surface); box-shadow: 0 1px 2px rgba(25, 20, 10, .3);
+  transition: transform var(--dur) var(--ease);
+}
+[aria-checked="true"] > .switch { background: var(--ink); }
+[aria-checked="true"] > .switch::after { transform: translateX(18px); }
+
+/* "Yedek bekliyor": a small dot on the menu button */
+#menu-btn { position: relative; }
+#menu-btn.has-dot::after {
+  content: ""; position: absolute; top: 6px; right: 6px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--focus); box-shadow: 0 0 0 2px var(--surface);
+}
+
+/* Cloud dialogs */
+.cloud-form .dlg-text strong { color: var(--ink); }
+.cloud-form .field { width: 100%; min-width: 0; }
+.cloud-form .field-label { margin-top: 10px; }
+.cloud-form .field + .field-label { margin-top: 14px; }
+.form-error { margin: 12px 0 0; color: var(--danger); font-size: 14.5px; font-weight: 700; }
+.cloud-actions { flex-direction: column-reverse; align-items: stretch; gap: 8px; }
+.cloud-actions .btn { text-align: center; }
+@media (min-width: 640px) {
+  .cloud-actions { flex-direction: row; justify-content: flex-end; }
+}
+.cloud-extra { align-self: flex-start; min-height: 40px; padding: 0 16px; margin: 2px 0 6px; font-size: 14px; }
+.cloud-extra .icon { width: 20px; height: 20px; }
+.btn:disabled, .cloud-form input:disabled { opacity: .55; cursor: progress; }
+
 /* Toast */
 .toast {
   position: fixed; z-index: 30; left: 0; right: 0; margin-inline: auto; width: max-content;

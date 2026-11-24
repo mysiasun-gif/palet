@@ -1,4 +1,6 @@
-// Palet: colour notes, checklists and reminders. Data stays on the device (IndexedDB).
+// Palet: colour notes, checklists and reminders. Data stays on the device (IndexedDB),
+// with an optional encrypted backup in the user's own Google Drive (cloud.js).
+import { CloudError, checkPassword, encryptBackup, decryptBackup, createDrive, createAuth, loadGis, gisReady } from './cloud.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 
@@ -33,9 +35,14 @@ const DAY = 86400000;
 /* ---------- Preferences (per device convenience) ---------- */
 const PREF_KEY = 'palet.prefs';
 const DEFAULT_PREFS = { layout: 'grid', sort: 'updated', theme: 'system', lastColor: 'yellow' };
+// Cloud settings kept on the device. Never the token or the password: those live only in memory.
+const DEFAULT_CLOUD = { connected: false, email: '', setup: false, encrypt: true, auto: false, lastBackupAt: 0, lastHash: '' };
 function loadPrefs() {
-  try { return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREF_KEY) || '{}') }; }
-  catch { return { ...DEFAULT_PREFS }; }
+  let p;
+  try { p = { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREF_KEY) || '{}') }; }
+  catch { p = { ...DEFAULT_PREFS }; }
+  p.cloud = { ...DEFAULT_CLOUD, ...(p.cloud && typeof p.cloud === 'object' ? p.cloud : {}) };
+  return p;
 }
 function savePrefs() {
   try { localStorage.setItem(PREF_KEY, JSON.stringify(state.prefs)); } catch { /* storage unavailable */ }
@@ -68,6 +75,8 @@ const dbAll = () => tx('readonly', s => s.getAll());
 const dbPut = note => tx('readwrite', s => s.put(note));
 const dbDelete = id => tx('readwrite', s => s.delete(id));
 const dbPutMany = notes => tx('readwrite', s => { notes.forEach(n => s.put(n)); });
+// One transaction: if anything fails, IndexedDB rolls back and the old notes stay.
+const dbReplaceAll = notes => tx('readwrite', s => { s.clear(); notes.forEach(n => s.put(n)); });
 
 let persistAsked = false;
 function requestPersist() {
@@ -143,10 +152,12 @@ async function saveNote(n, { touch = true } = {}) {
   if (state.pending?.id === n.id) state.pending = null;
   try { await dbPut(n); } catch (err) { console.error(err); toast('Not kaydedilemedi. Depolama alanını kontrol edip tekrar dene.'); }
   requestPersist();
+  scheduleAutoBackup();
 }
 async function destroyNote(id) {
   state.notes = state.notes.filter(n => n.id !== id);
   await dbDelete(id);
+  scheduleAutoBackup();
 }
 
 /* ---------- Helpers ---------- */
@@ -211,24 +222,40 @@ function toast(msg, action) {
 function hideToast() { $('#toast').hidden = true; }
 
 /* ---------- Dialog helpers ---------- */
-function showSheet(title, items, { brand = false } = {}) {
+// items: { icon, label, sub?, dot?, danger?, checked? (radio), toggle? (switch), keep? (stay open), run }
+function showSheet(title, items, { brand = false, info = '', onClose } = {}) {
   const dlg = $('#dlg-sheet');
   $('#sheet-brand').hidden = !brand;
   $('#sheet-title').textContent = title;
+  const infoEl = $('#sheet-info');
+  infoEl.hidden = !info;
+  infoEl.innerHTML = info;
   const box = $('#sheet-items');
   box.innerHTML = '';
   items.filter(Boolean).forEach(it => {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = `sheet-item${it.danger ? ' danger' : ''}`;
-    b.innerHTML = `${icon(it.icon)}<span>${esc(it.label)}</span>${it.checked ? icon('check', 'tick') : ''}`;
+    b.className = `sheet-item${it.danger ? ' danger' : ''}${it.sub ? ' has-sub' : ''}`;
+    const label = it.sub
+      ? `<span class="sheet-label"><span>${esc(it.label)}</span><span class="sheet-sub${it.dot ? ' pending' : ''}">${esc(it.sub)}</span></span>`
+      : `<span>${esc(it.label)}</span>`;
+    const end = it.toggle !== undefined ? '<span class="switch" aria-hidden="true"></span>' : it.checked ? icon('check', 'tick') : '';
+    b.innerHTML = `${icon(it.icon)}${label}${end}`;
     if (it.checked !== undefined) { b.setAttribute('role', 'menuitemradio'); b.setAttribute('aria-checked', String(!!it.checked)); }
-    b.addEventListener('click', () => { dlg.close(); it.run(); });
+    if (it.toggle !== undefined) { b.setAttribute('role', 'switch'); b.setAttribute('aria-checked', String(!!it.toggle)); }
+    b.addEventListener('click', () => { if (!it.keep) dlg.close(); it.run(b); });
     box.appendChild(b);
   });
-  dlg.showModal();
+  if (onClose) {
+    // The previous sheet's close event can arrive after this one opened; only a real close counts.
+    const h = () => { if (dlg.open) return; dlg.removeEventListener('close', h); onClose(); };
+    dlg.addEventListener('close', h);
+  }
+  if (!dlg.open) dlg.showModal();
   box.querySelector('button')?.focus();
 }
+// A tap on the dimmed area around a sheet closes it.
+$('#dlg-sheet').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 
 function confirmDialog({ title, body, ok }) {
   const dlg = $('#dlg-confirm');
@@ -803,8 +830,10 @@ $('#dlg-remind').addEventListener('close', async () => {
 });
 
 /* ---------- Backup ---------- */
+// The same data goes into the file backup and the cloud backup.
+const backupData = () => ({ app: 'palet', version: 1, exportedAt: new Date().toISOString(), notes: state.notes });
 function exportBackup() {
-  const data = { app: 'palet', version: 1, exportedAt: new Date().toISOString(), notes: state.notes };
+  const data = backupData();
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -815,30 +844,499 @@ function exportBackup() {
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   toast(`${state.notes.length} not yedek dosyasına yazıldı`);
 }
+// Brings backup data in. Used by "Dosyadan geri yükle" and by the cloud restore.
+// merge (default): new notes are added, a note is replaced only by a newer copy of itself.
+// replace: this device's notes become exactly the backup's notes.
+// The database is written first; memory changes only after it succeeded.
+async function importBackup(data, { replace = false } = {}) {
+  const raw = Array.isArray(data) ? data : data?.notes;
+  if (!Array.isArray(raw)) throw new Error('format');
+  const incoming = [...new Map(raw.map(sanitize).filter(Boolean).map(n => [n.id, n])).values()];
+  let added = 0; let updated = 0;
+  if (replace) {
+    await dbReplaceAll(incoming);
+    state.notes = incoming;
+    added = incoming.length;
+  } else {
+    const toWrite = [];
+    incoming.forEach(n => {
+      const cur = state.notes.find(x => x.id === n.id);
+      if (!cur) { toWrite.push(n); added++; }
+      else if (n.updatedAt > cur.updatedAt) { toWrite.push({ ...cur, ...n }); updated++; }
+    });
+    await dbPutMany(toWrite);
+    toWrite.forEach(n => {
+      const cur = state.notes.find(x => x.id === n.id);
+      if (cur) Object.assign(cur, n); else state.notes.push(n);
+    });
+  }
+  render();
+  scheduleReminders();
+  scheduleAutoBackup();
+  return { added, updated, total: incoming.length };
+}
 $('#import-file').addEventListener('change', async e => {
   const file = e.target.files?.[0];
   e.target.value = '';
   if (!file) return;
   try {
-    const data = JSON.parse(await file.text());
-    const raw = Array.isArray(data) ? data : data?.notes;
-    if (!Array.isArray(raw)) throw new Error('format');
-    const incoming = raw.map(sanitize).filter(Boolean);
-    let added = 0; let updated = 0;
-    const toWrite = [];
-    incoming.forEach(n => {
-      const cur = state.notes.find(x => x.id === n.id);
-      if (!cur) { state.notes.push(n); toWrite.push(n); added++; }
-      else if (n.updatedAt > cur.updatedAt) { Object.assign(cur, n); toWrite.push(cur); updated++; }
-    });
-    await dbPutMany(toWrite);
-    render();
-    scheduleReminders();
+    const { added, updated } = await importBackup(JSON.parse(await file.text()));
     toast(added || updated ? `${added} not eklendi, ${updated} not güncellendi` : 'Yedekteki notların hepsi zaten burada');
   } catch {
     toast('Bu dosya okunamadı. TakJot’tan indirilen bir .json yedek dosyası seç.');
   }
 });
+
+
+/* ---------- Cloud backup (Google Drive, appDataFolder) ---------- */
+const AUTO_EVERY = DAY;              // automatic backup at most once a day
+const AUTO_CHECK_MS = 10 * 60000;    // while the app is open, look every 10 minutes
+const AUTO_RETRY_MS = 30 * 60000;    // after a failed automatic try, wait before the next
+const auth = createAuth();
+const drive = createDrive({
+  fetchFn: (...a) => fetch(...a),
+  getToken: () => auth.token(),
+  refreshToken: () => auth.request({ quiet: true, hint: state.prefs.cloud.email || undefined }),
+});
+let sessionPw = null;                // the backup password, in memory for this session only
+let cloudBusy = false;
+let autoTimer = 0;
+let autoFailedAt = 0;
+
+const fullWhen = ts => `${fmtDayYear.format(ts)} ${fmtTime.format(ts)}`;
+const CLOUD_MSG = {
+  network: 'İnternete ulaşılamadı. Bağlantı gelince tekrar dene; notların bu cihazda olduğu gibi duruyor.',
+  auth: 'Google oturumunun süresi doldu. Bağlantıyı yenileyip tekrar dene.',
+  denied: 'Google izni verilmedi. Yedek için Drive’daki uygulama klasörüne erişim izni gerekiyor.',
+  'popup-closed': 'Google penceresi kapandı. Hazır olduğunda tekrar dene.',
+  'popup-blocked': 'Google penceresi açılamadı. Tekrar dokun; olmazsa tarayıcının açılır pencere ayarına bak.',
+  'wrong-password': 'Şifre yanlış',
+  corrupt: 'Bu yedek okunamadı, dosya bozulmuş olabilir. Başka bir yedek seç.',
+  quota: 'Google Drive alanı dolu. Biraz yer açıp tekrar dene.',
+  notfound: 'Bu yedek artık Drive’da yok. Listeyi yeniden açıp tekrar dene.',
+  server: 'Google Drive şu an yanıt vermiyor. Biraz sonra tekrar dene.',
+  'weak-password': 'Şifre en az 8 karakter olmalı.',
+};
+const cloudMessage = err => (err instanceof CloudError && CLOUD_MSG[err.code]) || 'Bir şey ters gitti. Notların olduğu gibi duruyor; tekrar dene.';
+
+// A fingerprint of the notes, to tell whether anything changed since the last backup.
+const notesSignature = () => String(hashStr(JSON.stringify([...state.notes].sort((a, b) => (a.id < b.id ? -1 : 1)))));
+
+/* Dialog with fields. onSubmit(value, fields) may return { error } to stay open and show it,
+   or throw a CloudError, which is shown the same way. Resolves to null when cancelled. */
+function formDialog({ title, html = '', actions, onSubmit, onAction }) {
+  const dlg = $('#dlg-cloud');
+  const form = $('#cloud-form');
+  form.innerHTML = `<h2 id="cloud-title" class="dlg-title">${esc(title)}</h2>${html}<p class="form-error" role="alert" hidden></p>
+    <div class="dlg-actions cloud-actions">${actions.map(a => `<button class="btn ${a.kind ?? 'ghost'}" type="submit" value="${esc(a.value)}">${esc(a.label)}</button>`).join('')}</div>`;
+  const errEl = form.querySelector('.form-error');
+  return new Promise(resolve => {
+    let busy = false; let done = false;
+    const finish = v => {
+      if (done) return;
+      done = true;
+      form.onsubmit = null; form.onclick = null; dlg.oncancel = null;
+      dlg.close();
+      form.innerHTML = ''; // nothing typed (passwords) stays in the page
+      resolve(v);
+    };
+    const showError = msg => { errEl.textContent = msg; errEl.hidden = !msg; };
+    form.onsubmit = async e => {
+      e.preventDefault();
+      if (busy) return;
+      const btn = e.submitter;
+      const value = btn?.value ?? actions[actions.length - 1].value;
+      if (value === 'cancel') { finish(null); return; }
+      if (!onSubmit) { finish({ value }); return; }
+      const fields = Object.fromEntries(new FormData(form));
+      const act = actions.find(a => a.value === value);
+      const label = btn?.textContent;
+      busy = true;
+      showError('');
+      form.querySelectorAll('button, input').forEach(el => { el.disabled = true; });
+      if (btn && act?.busy) btn.textContent = act.busy;
+      let r;
+      try { r = await onSubmit(value, fields); } catch (err) {
+        if (err?.code === 'auth') auth.clear();
+        r = { error: cloudMessage(err) };
+      }
+      busy = false;
+      if (done) return;
+      form.querySelectorAll('button, input').forEach(el => { el.disabled = false; });
+      if (btn && label) btn.textContent = label;
+      if (r?.error) {
+        showError(r.error);
+        (form.querySelector('input[type="password"]') ?? btn)?.focus();
+        form.querySelector('input[type="password"]')?.select();
+        return;
+      }
+      finish(r === undefined ? { value } : r);
+    };
+    form.onclick = e => {
+      const b = e.target.closest('button[data-act]');
+      if (b && onAction) onAction(b.dataset.act, b);
+    };
+    dlg.oncancel = e => { e.preventDefault(); if (!busy) finish(null); };
+    dlg.showModal();
+    (form.querySelector('input') ?? form.querySelector('.btn.primary'))?.focus();
+  });
+}
+const CANCEL = { value: 'cancel', label: 'Vazgeç' };
+const pwFields = ({ twice = false, label = 'Yedek şifresi' } = {}) => `
+  <label class="field-label" for="cf-pw">${esc(label)}</label>
+  <input id="cf-pw" name="pw" class="field" type="password" autocomplete="${twice ? 'new-password' : 'current-password'}" spellcheck="false" autocapitalize="off">
+  ${twice ? `<label class="field-label" for="cf-pw2">Şifre (tekrar)</label>
+  <input id="cf-pw2" name="pw2" class="field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off">
+  <p class="hint">En az 8 karakter.</p>` : ''}`;
+const newPasswordError = f => checkPassword(f.pw ?? '') || (f.pw !== f.pw2 ? 'İki şifre aynı değil. İkisini de aynı yaz.' : null);
+const NO_RECOVERY = '<p class="dlg-text"><strong>Şifreyi unutursan notlar kimse tarafından kurtarılamaz, biz de kurtaramayız.</strong> Şifreyi güvenli bir yere yaz.</p>';
+
+// Opens Google's window. Call it straight from a tap, so the browser lets the window open.
+function connectNow() {
+  const hint = state.prefs.cloud.email || undefined;
+  return gisReady() ? auth.request({ hint }) : loadGis().then(() => auth.request({ hint }));
+}
+function connectDialog(text, label = 'Google ile bağlan', title = 'Google hesabı') {
+  return formDialog({
+    title, html: `<p class="dlg-text">${esc(text)}</p>`,
+    actions: [CANCEL, { value: 'ok', label, kind: 'primary', busy: 'Bağlanıyor…' }],
+    onSubmit: async () => { auth.clear(); await connectNow(); },
+  });
+}
+// A valid token, or a reason why not. Opens Google's window at once when it can,
+// otherwise asks for one more tap.
+async function ensureToken() {
+  if (auth.valid()) return;
+  if (gisReady()) {
+    try { await connectNow(); return; } catch (e) { if (e?.code !== 'popup-blocked') throw e; }
+  }
+  const ok = await connectDialog('Devam etmek için Google hesabına bağlan.');
+  if (!ok) throw new CloudError('cancelled');
+}
+async function noteConnected() {
+  const c = state.prefs.cloud;
+  c.connected = true;
+  if (!c.email) c.email = (await drive.email()) || '';
+  savePrefs();
+}
+
+async function cloudTask(fn) {
+  if (cloudBusy) { toast('Bir bulut işlemi sürüyor. Bitince tekrar dene.'); return; }
+  cloudBusy = true;
+  try { await runCloud(fn); } finally { cloudBusy = false; refreshPendingMark(); }
+}
+async function runCloud(fn, retried = false) {
+  try { return await fn(); } catch (e) {
+    if (e?.code === 'cancelled') return undefined;
+    if (e?.code === 'auth' && !retried) {
+      auth.clear();
+      const ok = await connectDialog('Google oturumunun süresi doldu. Devam etmek için bağlantıyı yenile.', 'Google bağlantısını yenile', 'Google bağlantısı');
+      return ok ? runCloud(fn, true) : undefined;
+    }
+    toast(cloudMessage(e));
+    return undefined;
+  }
+}
+
+// Wrong password for the newest encrypted backup? Then this is not the current password.
+async function verifyPassword(pw) {
+  const latest = (await drive.list()).find(f => f.enc);
+  if (!latest) return;
+  const env = await drive.download(latest.id);
+  try { await decryptBackup(env, pw); } catch (e) { if (e.code === 'wrong-password') throw e; }
+}
+
+// Encrypts this device's notes and uploads them; keeps the newest three backups.
+// Settings and the session password change only after the upload succeeded.
+async function doBackup({ pw, encrypt }) {
+  if (state.editing && saveTimer) await commit();
+  const sig = notesSignature();
+  const env = await encryptBackup(backupData(), encrypt ? pw : null);
+  const file = await drive.create(env);
+  await drive.prune(file.id).catch(() => {});
+  const c = state.prefs.cloud;
+  Object.assign(c, { setup: true, encrypt, lastBackupAt: file.createdAt || Date.now(), lastHash: sig });
+  sessionPw = encrypt ? pw : null;
+  autoFailedAt = 0;
+  await noteConnected().catch(() => savePrefs());
+  return file;
+}
+async function backupNow(opts) {
+  toast('Buluta kaydediliyor…');
+  const file = await doBackup(opts);
+  toast(`${file.noteCount} not buluta kaydedildi`);
+}
+
+function cloudSave() {
+  const c = state.prefs.cloud;
+  loadGis().catch(() => {});
+  if (!c.setup) { cloudTask(setupFlow); return; }
+  if (c.encrypt && !sessionPw) { cloudTask(passwordThenBackup); return; }
+  cloudTask(async () => { await ensureToken(); await backupNow({ pw: sessionPw, encrypt: c.encrypt }); });
+}
+
+// First "Buluta kaydet": what happens, the password twice, then Google.
+async function setupFlow() {
+  const r = await formDialog({
+    title: 'Buluta kaydet',
+    html: `<p class="dlg-text">Notların, Google Drive’ında yalnızca TakJot’un görebildiği gizli bir klasöre kaydedilir. Bu yedek Drive listende görünmez.</p>
+      <p class="dlg-text">Yedek, gönderilmeden önce bu cihazda belirlediğin şifreyle kilitlenir. Son 3 yedek tutulur.</p>
+      ${NO_RECOVERY}${pwFields({ twice: true })}`,
+    actions: [CANCEL, { value: 'ok', label: 'Google ile bağlan ve kaydet', kind: 'primary', busy: 'Google bekleniyor…' }],
+    onSubmit: async (v, f) => {
+      const bad = newPasswordError(f);
+      if (bad) return { error: bad };
+      if (!auth.valid()) await connectNow();
+      return { pw: f.pw };
+    },
+  });
+  if (!r) return;
+  await noteConnected();
+  const files = await drive.list();
+  if (files.length) {
+    const pick = await formDialog({
+      title: 'Drive’da yedeklerin var',
+      html: `<p class="dlg-text">Bu hesapta ${files.length} TakJot yedeği bulundu (en yenisi ${esc(fullWhen(files[0].createdAt))}). Yeni yedek bunlara eklenir, en eski olanlar silinir.</p>
+        <p class="dlg-text">Başka bir cihazdan geliyorsan önce geri yüklemek isteyebilirsin.</p>`,
+      actions: [CANCEL, { value: 'restore', label: 'Önce geri yükle', kind: 'outline' }, { value: 'save', label: 'Yeni yedek oluştur', kind: 'primary' }],
+    });
+    if (!pick) return;
+    if (pick.value === 'restore') { await restoreFrom(files, r.pw); return; }
+  }
+  await backupNow({ pw: r.pw, encrypt: true });
+}
+
+// A new session: ask for the password once and check it against the newest backup.
+async function passwordThenBackup() {
+  const r = await formDialog({
+    title: 'Yedek şifresi',
+    html: `<p class="dlg-text">Yedeği kilitlemek için yedek şifreni gir. Bu oturumda tekrar sorulmaz.</p>${pwFields()}
+      <p class="hint">Unuttuysan Bulut ayarlarından yeni şifre belirleyebilirsin; eski yedekler o zaman açılamaz.</p>`,
+    actions: [CANCEL, { value: 'ok', label: 'Buluta kaydet', kind: 'primary', busy: 'Kontrol ediliyor…' }],
+    onSubmit: async (v, f) => {
+      if (!f.pw) return { error: 'Yedek şifreni yaz.' };
+      if (!auth.valid()) await connectNow();
+      await verifyPassword(f.pw);
+      return { pw: f.pw };
+    },
+  });
+  if (!r) return;
+  await backupNow({ pw: r.pw, encrypt: true });
+}
+
+function cloudRestore() {
+  loadGis().catch(() => {});
+  cloudTask(async () => {
+    if (!auth.valid()) {
+      if (!state.prefs.cloud.connected) {
+        const ok = await connectDialog('Drive’daki TakJot yedeklerine ulaşmak için yedeği aldığın Google hesabına bağlan.', 'Google ile bağlan', 'Buluttan geri yükle');
+        if (!ok) return;
+      } else {
+        await ensureToken();
+      }
+    }
+    await noteConnected();
+    toast('Yedekler aranıyor…');
+    await restoreFrom(await drive.list());
+  });
+}
+
+function pickBackup(files) {
+  return new Promise(resolve => {
+    showSheet('Hangi yedek geri yüklensin?', files.map(f => ({
+      icon: f.enc ? 'lock' : 'cloud',
+      label: fullWhen(f.createdAt),
+      sub: `${f.noteCount} not · ${f.enc ? 'şifreli' : 'şifresiz'}`,
+      run: () => resolve(f),
+    })), { onClose: () => resolve(null) });
+  });
+}
+
+async function restoreFrom(files, pwHint) {
+  hideToast();
+  if (!files.length) {
+    await formDialog({
+      title: 'Yedek bulunamadı',
+      html: '<p class="dlg-text">Bu Google hesabının Drive’ında TakJot yedeği yok. Yedeği aldığın hesapla bağlandığından emin ol ya da önce bir cihazdan Buluta kaydet.</p>',
+      actions: [{ value: 'cancel', label: 'Tamam', kind: 'primary' }],
+    });
+    return;
+  }
+  const file = await pickBackup(files);
+  if (!file) return;
+  toast('Yedek indiriliyor…');
+  const env = await drive.download(file.id);
+  hideToast();
+  let data = null; let pw = null;
+  if (env.enc) {
+    for (const p of [sessionPw, pwHint].filter(Boolean)) {
+      try { data = await decryptBackup(env, p); pw = p; break; } catch (e) { if (e.code !== 'wrong-password') throw e; }
+    }
+    if (!data) {
+      const r = await formDialog({
+        title: 'Yedek şifresi',
+        html: `<p class="dlg-text">${esc(fullWhen(file.createdAt))} tarihli yedek şifreli. Açmak için yedeği alırken belirlediğin şifreyi gir.</p>${pwFields()}`,
+        actions: [CANCEL, { value: 'ok', label: 'Yedeği aç', kind: 'primary', busy: 'Açılıyor…' }],
+        onSubmit: async (v, f) => {
+          if (!f.pw) return { error: 'Yedek şifreni yaz.' };
+          return { data: await decryptBackup(env, f.pw), pw: f.pw };
+        },
+      });
+      if (!r) return;
+      ({ data, pw } = r);
+    }
+  } else {
+    data = await decryptBackup(env, null);
+  }
+
+  const incoming = (Array.isArray(data) ? data : data.notes).length;
+  const here = state.notes.length;
+  const mode = await formDialog({
+    title: 'Yedeği geri yükle',
+    html: `<p class="dlg-text">Yedekte ${incoming} not var, bu cihazda ${here} not var.</p>
+      ${here ? `<p class="dlg-text">İstersen önce bu cihazdaki notları dosya olarak indir.</p>
+      <button class="btn outline cloud-extra" type="button" data-act="download">${icon('download')}<span>Mevcut notları indir</span></button>` : ''}
+      <p class="hint"><b>Ekle:</b> yedekteki notlar eklenir, aynı notun daha yeni hâli varsa güncellenir. <b>Yerine koy:</b> bu cihazdaki notlar silinir, yalnızca yedektekiler kalır.</p>`,
+    actions: [CANCEL, { value: 'replace', label: 'Mevcut notların yerine koy', kind: 'outline' }, { value: 'merge', label: 'Mevcut notlara ekle', kind: 'primary' }],
+    onAction: (act, btn) => {
+      if (act !== 'download') return;
+      exportBackup();
+      btn.disabled = true;
+      btn.innerHTML = `${icon('check')}<span>İndirildi</span>`;
+    },
+  });
+  if (!mode) return;
+  const replace = mode.value === 'replace';
+  if (replace && here) {
+    const ok = await confirmDialog({
+      title: 'Mevcut notlar değiştirilsin mi?',
+      body: `Bu cihazdaki ${here} not silinecek, yerine yedekteki ${incoming} not gelecek. Bu işlem geri alınamaz.`,
+      ok: 'Yerine koy',
+    });
+    if (!ok) return;
+  }
+  let res;
+  try { res = await importBackup(data, { replace }); } catch (err) {
+    console.error(err?.name ?? 'import');
+    toast('Notlar yazılamadı, bu cihazdaki notlar olduğu gibi duruyor. Depolama alanını kontrol edip tekrar dene.');
+    return;
+  }
+  const c = state.prefs.cloud;
+  if (env.enc && pw) { sessionPw = pw; if (!c.setup) { c.setup = true; c.encrypt = true; } }
+  c.lastBackupAt = Math.max(c.lastBackupAt || 0, files[0].createdAt || 0);
+  if (replace && file.id === files[0].id) c.lastHash = notesSignature();
+  savePrefs();
+  toast(replace ? `${res.added} not geri yüklendi` : (res.added || res.updated ? `${res.added} not eklendi, ${res.updated} not güncellendi` : 'Yedekteki notların hepsi zaten burada'));
+}
+
+/* Settings: account, password, encryption, automatic backup */
+function cloudSettings() {
+  loadGis().catch(() => {});
+  const c = state.prefs.cloud;
+  const locked = c.setup && c.encrypt;
+  const info = c.connected
+    ? `${icon('cloud')}<span><small>Bağlı hesap</small><b>${esc(c.email || 'Google hesabı')}</b></span>`
+    : `${icon('cloud')}<span><small>Google hesabı</small><b>Bağlı değil</b></span>`;
+  showSheet('Bulut ayarları', [
+    c.connected
+      ? { icon: 'close', label: 'Bağlantıyı kes', run: disconnectCloud }
+      : { icon: 'cloud', label: 'Google hesabına bağlan', run: () => cloudTask(async () => { auth.clear(); await ensureToken(); await noteConnected(); toast('Google hesabına bağlandı'); }) },
+    { icon: 'lock', label: locked ? 'Yedek şifresini değiştir' : 'Yedek şifresini belirle', run: () => cloudTask(changePassword) },
+    locked && { icon: 'unlock', label: 'Şifrelemeyi kapat', danger: true, run: disableEncryption },
+    {
+      icon: 'sync', label: 'Otomatik yedek', toggle: c.auto, keep: true,
+      sub: c.auto ? 'Açık · uygulama açıkken, günde en fazla bir kez' : 'Kapalı',
+      run: b => {
+        c.auto = !c.auto;
+        savePrefs();
+        b.setAttribute('aria-checked', String(c.auto));
+        b.querySelector('.sheet-sub').textContent = c.auto ? 'Açık · uygulama açıkken, günde en fazla bir kez' : 'Kapalı';
+        refreshPendingMark();
+        if (c.auto) scheduleAutoBackup();
+      },
+    },
+  ], { info });
+}
+
+async function changePassword() {
+  const c = state.prefs.cloud;
+  const locked = c.setup && c.encrypt;
+  await formDialog({
+    title: locked ? 'Yedek şifresini değiştir' : 'Yedek şifresini belirle',
+    html: `<p class="dlg-text">Yeni şifreyle hemen yeni bir yedek alınır. Eski yedekler eski şifreleriyle açılır.</p>${NO_RECOVERY}${pwFields({ twice: true, label: 'Yeni şifre' })}`,
+    actions: [CANCEL, { value: 'ok', label: 'Kaydet ve yedekle', kind: 'primary', busy: 'Kaydediliyor…' }],
+    onSubmit: async (v, f) => {
+      const bad = newPasswordError(f);
+      if (bad) return { error: bad };
+      if (!auth.valid()) await connectNow();
+      await doBackup({ pw: f.pw, encrypt: true });
+      return { value: 'ok' };
+    },
+  }).then(r => { if (r) toast('Yeni şifre geçerli, yeni yedek alındı'); });
+}
+
+async function disableEncryption() {
+  const ok = await confirmDialog({
+    title: 'Şifreleme kapatılsın mı?',
+    body: 'Bundan sonraki yedekler şifresiz kaydedilir. Google hesabına erişebilen biri bu yedeklerdeki notları okuyabilir. Önceki şifreli yedekler şifreli kalır.',
+    ok: 'Şifrelemeyi kapat',
+  });
+  if (!ok) return;
+  const c = state.prefs.cloud;
+  c.encrypt = false;
+  c.setup = true;
+  sessionPw = null;
+  savePrefs();
+  toast('Şifreleme kapatıldı. Sonraki yedekler şifresiz kaydedilecek.');
+}
+
+async function disconnectCloud() {
+  const ok = await confirmDialog({
+    title: 'Google bağlantısı kesilsin mi?',
+    body: 'Drive’daki yedeklerin silinmez; tekrar bağlandığında yine görürsün. Bu cihazdaki notlar olduğu gibi kalır.',
+    ok: 'Bağlantıyı kes',
+  });
+  if (!ok) return;
+  auth.revoke();
+  sessionPw = null;
+  state.prefs.cloud = { ...DEFAULT_CLOUD };
+  savePrefs();
+  refreshPendingMark();
+  toast('Google bağlantısı kesildi');
+}
+
+/* Automatic backup: only while the app is open, at most once a day, only after changes,
+   and only with a token and password already in memory. Otherwise it waits and says so. */
+function autoState() {
+  const c = state.prefs.cloud;
+  if (!c.auto) return 'off';
+  if (c.lastHash && notesSignature() === c.lastHash) return 'clean';
+  if (Date.now() - (c.lastBackupAt || 0) < AUTO_EVERY) return 'wait';
+  if (!c.setup || !auth.valid() || (c.encrypt && !sessionPw) || navigator.onLine === false) return 'pending';
+  if (autoFailedAt && Date.now() - autoFailedAt < AUTO_RETRY_MS) return 'pending';
+  return 'due';
+}
+function refreshPendingMark() {
+  const waiting = autoState() === 'pending';
+  const btn = $('#menu-btn');
+  btn.classList.toggle('has-dot', waiting);
+  btn.setAttribute('aria-label', waiting ? 'Görünüm ve yedek seçenekleri, yedek bekliyor' : 'Görünüm ve yedek seçenekleri');
+}
+function scheduleAutoBackup() {
+  clearTimeout(autoTimer);
+  autoTimer = setTimeout(maybeAutoBackup, 15000);
+}
+async function maybeAutoBackup() {
+  const s = autoState();
+  refreshPendingMark();
+  if (s !== 'due' || cloudBusy || state.editing || document.visibilityState === 'hidden') return;
+  const c = state.prefs.cloud;
+  cloudBusy = true;
+  try { await doBackup({ pw: sessionPw, encrypt: c.encrypt }); } catch { autoFailedAt = Date.now(); } finally {
+    cloudBusy = false;
+    refreshPendingMark();
+  }
+}
 
 /* ---------- Theme ---------- */
 function applyTheme() {
@@ -863,12 +1361,20 @@ window.addEventListener('appinstalled', () => { installPrompt = null; toast('Tak
 
 function mainMenu() {
   const p = state.prefs;
+  const c = p.cloud;
+  const waiting = autoState() === 'pending';
   showSheet('Görünüm ve yedek', [
     { icon: p.layout === 'grid' ? 'rows' : 'grid', label: p.layout === 'grid' ? 'Liste görünümüne geç' : 'Izgara görünümüne geç', run: () => { p.layout = p.layout === 'grid' ? 'rows' : 'grid'; savePrefs(); render(); } },
     { icon: 'sort', label: `Sıralama: ${SORTS[p.sort]}`, run: () => setTimeout(sortMenu, 0) },
     { icon: 'theme', label: `Tema: ${THEMES[p.theme]}`, run: () => setTimeout(themeMenu, 0) },
-    { icon: 'download', label: 'Yedeği indir', run: exportBackup },
-    { icon: 'upload', label: 'Yedekten geri yükle', run: () => $('#import-file').click() },
+    {
+      icon: 'cloud-up', label: 'Buluta kaydet', run: cloudSave, dot: waiting,
+      sub: waiting ? 'Yedek bekliyor' : c.lastBackupAt ? `Son yedek: ${fullWhen(c.lastBackupAt)}` : 'Henüz yedek yok',
+    },
+    { icon: 'cloud-down', label: 'Buluttan geri yükle', run: cloudRestore },
+    { icon: 'cloud', label: 'Bulut ayarları', sub: c.connected ? (c.email || 'Google hesabı bağlı') : 'Bağlı değil', run: () => setTimeout(cloudSettings, 0) },
+    { icon: 'download', label: 'Yedeği dosya olarak indir', run: exportBackup },
+    { icon: 'upload', label: 'Dosyadan geri yükle', run: () => $('#import-file').click() },
     installPrompt && {
       icon: 'install', label: 'Uygulamayı ana ekrana ekle',
       run: async () => { const ev = installPrompt; installPrompt = null; await ev.prompt(); },
@@ -1092,7 +1598,7 @@ async function saveManualOrder() {
     if (n && n.order !== i) { n.order = i; changed.push(n); }
   });
   if (!changed.length) return;
-  try { await dbPutMany(changed); requestPersist(); }
+  try { await dbPutMany(changed); requestPersist(); scheduleAutoBackup(); }
   catch (err) { console.error(err); toast('Sıra kaydedilemedi. Depolama alanını kontrol edip tekrar dene.'); }
 }
 
@@ -1308,8 +1814,9 @@ document.addEventListener('keydown', e => {
 /* ---------- Lifecycle ---------- */
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') commit();
-  else { scheduleReminders(); if (!state.editing) render(); }
+  else { scheduleReminders(); if (!state.editing) render(); scheduleAutoBackup(); }
 });
+window.addEventListener('online', () => scheduleAutoBackup());
 window.addEventListener('pagehide', () => commit());
 
 navigator.serviceWorker?.addEventListener('message', e => {
@@ -1334,6 +1841,8 @@ async function init() {
   const r = parseRoute();
   if (r.note) { render(); onRoute(); } else onRoute();
   scheduleReminders();
+  refreshPendingMark();
+  setInterval(maybeAutoBackup, AUTO_CHECK_MS);
 
   if ('serviceWorker' in navigator && window.isSecureContext) {
     navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker kaydedilemedi', err));

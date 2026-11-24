@@ -57,6 +57,12 @@
       <path d="M7 18v25a4.5 4.5 0 0 0 9 0V12a7.5 7.5 0 0 0-15 0v31" fill="none" stroke="#8E97A3" stroke-width="2.6" stroke-linecap="round"/>
       <path d="M7 18v25a4.5 4.5 0 0 0 9 0V12" fill="none" stroke="#C9D0D8" stroke-width="1" stroke-linecap="round" opacity=".8"/>
     </symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18.5a4 4 0 0 1-.4-7.98A5.5 5.5 0 0 1 17.2 9.1 4.75 4.75 0 0 1 17 18.5z"/></symbol>
+    <symbol id="i-cloud-up" viewBox="0 0 24 24"><path d="M7 18.5a4 4 0 0 1-.4-7.98A5.5 5.5 0 0 1 17.2 9.1 4.75 4.75 0 0 1 17 18.5z"/><path d="M12 16.5v-5M9.8 13.6l2.2-2.2 2.2 2.2"/></symbol>
+    <symbol id="i-cloud-down" viewBox="0 0 24 24"><path d="M7 18.5a4 4 0 0 1-.4-7.98A5.5 5.5 0 0 1 17.2 9.1 4.75 4.75 0 0 1 17 18.5z"/><path d="M12 11.2v5M9.8 14.1l2.2 2.2 2.2-2.2"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5M12 14.5v2"/></symbol>
+    <symbol id="i-unlock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 6.9-.8M12 14.5v2"/></symbol>
+    <symbol id="i-sync" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5"/><path d="M17.8 3.5V7h-3.5M6.2 20.5V17h3.5"/></symbol>
     <symbol id="i-install" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M12 7.5v6.5M9.5 11.5L12 14l2.5-2.5"/></symbol>
   </defs>
 </svg>
@@ -155,8 +161,13 @@
   <form method="dialog" class="sheet-form">
     <div id="sheet-brand" class="sheet-brand" hidden><img src="icons/logo.png" alt="" width="44" height="44"><span>TakJot</span></div>
     <h2 id="sheet-title" class="sheet-title"></h2>
+    <p id="sheet-info" class="sheet-info" hidden></p>
     <div id="sheet-items" class="sheet-items"></div>
   </form>
+</dialog>
+
+<dialog id="dlg-cloud" class="dlg" aria-labelledby="cloud-title">
+  <form id="cloud-form" method="dialog" class="dlg-form cloud-form" novalidate></form>
 </dialog>
 
 <input id="import-file" type="file" accept="application/json,.json" hidden>
