@@ -10,7 +10,11 @@
 // Only the salt, the wrapped note key and the check block are saved. Never the password or a key.
 
 export const VAULT_ITER = 600000;
-export const MIN_SECRET = 6;
+// New passwords: at least 8 characters; a password of digits only needs at least 10.
+// Only new or changed passwords are checked; existing ones keep opening their notes.
+export const MIN_SECRET = 8;
+export const MIN_SECRET_DIGITS = 10;
+export const SECRET_RULE = 'En az 8 karakter olmalı (sadece rakamsa 10).';
 const CHECK_TEXT = 'takjot-gizli-not-kontrol-v1';
 const BIO_INFO = 'takjot-gizli-not-biyometrik-v1';
 
@@ -42,7 +46,9 @@ const newKid = () => toB64(random(12)).replace(/[+/=]/g, c => ({ '+': '-', '/': 
 
 /* ---------- Password rules and strength ---------- */
 export function checkSecretPassword(pw) {
-  if (typeof pw !== 'string' || [...pw].length < MIN_SECRET) return `Şifre en az ${MIN_SECRET} karakter olmalı.`;
+  if (typeof pw !== 'string') return SECRET_RULE;
+  const len = [...pw].length;
+  if (len < MIN_SECRET || (/^\p{Nd}+$/u.test(pw) && len < MIN_SECRET_DIGITS)) return SECRET_RULE;
   if (pw.length > 1024) return 'Şifre çok uzun.';
   return null;
 }
@@ -52,11 +58,11 @@ export function passwordStrength(pw = '') {
   const kinds = [/\p{Ll}/u, /\p{Lu}/u, /\p{Nd}/u, /[^\p{L}\p{Nd}]/u].filter(r => r.test(pw)).length;
   const digitsOnly = /^\p{Nd}+$/u.test(pw);
   let score;
-  if (len < MIN_SECRET) score = 0;
+  if (checkSecretPassword(pw)) score = 0;
   else if (digitsOnly || len < 8 || kinds < 2) score = 1;
   else if ((len >= 10 && kinds >= 3) || (len >= 14 && kinds >= 2)) score = 3;
   else score = 2;
-  return { score, label: ['Çok kısa', 'Zayıf', 'Orta', 'Güçlü'][score] };
+  return { score, label: ['Yetersiz', 'Zayıf', 'Orta', 'Güçlü'][score] };
 }
 
 /* ---------- Wrong-password waits ---------- */

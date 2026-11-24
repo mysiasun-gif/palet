@@ -556,6 +556,7 @@ body:has(#fab[hidden]) .tab-gap { display: none; }
 }
 .card-secret .icon { width: 22px; height: 22px; stroke-width: 2.2; }
 .notes.rows .card-secret { justify-content: flex-start; margin: 2px 0; }
+.card-secret.only-lock .icon { width: 30px; height: 30px; }
 .stamp .icon { width: 14px; height: 14px; stroke-width: 2.4; margin-right: 5px; vertical-align: -2px; }
 .strength { display: flex; gap: 4px; margin-top: 10px; }
 .strength i { flex: 1; height: 5px; border-radius: 4px; background: var(--line); transition: background-color var(--dur) var(--ease); }

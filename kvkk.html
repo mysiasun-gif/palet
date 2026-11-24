@@ -22,9 +22,19 @@
   .doc-bar span { font-family: var(--hand); font-size: 28px; font-weight: 700; line-height: 1; }
   .doc-back { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; margin-left: auto; padding: 0 14px 0 8px; border-radius: 999px; font-weight: 700; color: var(--ink); text-decoration: none; }
   .doc-back:active { background: var(--press); }
-  .doc h1 { margin: 28px 0 12px; font-size: 32px; line-height: 1.1; font-weight: 700; letter-spacing: -.02em; }
-  .doc-paper { padding: 22px 20px; border-radius: 4px; background: var(--surface); border: 1px solid var(--line); }
-  .doc-paper p { margin: 0; color: var(--muted); }
+  .doc h1 { margin: 24px 0 14px; font-size: 32px; line-height: 1.1; font-weight: 700; letter-spacing: -.02em; }
+  .doc-paper { padding: 22px 20px 26px; border-radius: 4px; background: var(--surface); border: 1px solid var(--line); overflow-wrap: anywhere; }
+  .doc-paper h2 { margin: 26px 0 8px; font-size: 18px; line-height: 1.3; font-weight: 700; }
+  .doc-paper p, .doc-paper li { margin: 0; font-size: 16px; line-height: 1.6; color: var(--ink); }
+  .doc-paper p + p { margin-top: 8px; }
+  .doc-paper ul { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+  .doc-paper li::marker { color: var(--muted); }
+  .doc-date { color: var(--muted) !important; font-size: 14.5px !important; font-weight: 600; }
+  .doc-draft {
+    display: flex; align-items: center; gap: 8px; margin: 0 0 14px; padding: 9px 14px; border-radius: 4px;
+    background: color-mix(in oklab, var(--sun), transparent 55%); color: var(--ink); font-size: 14px; font-weight: 700;
+  }
+  .doc-draft::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ink); }
 </style>
 </head>
 <body>
@@ -32,14 +42,54 @@
   <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
 </svg>
 <main class="doc">
+  <p class="doc-draft" role="note">Taslak: yayından önce hukuki incelemeden geçecek.</p>
   <div class="doc-bar">
     <img src="icons/logo.png" alt="" width="40" height="40"><span>TakJot</span>
     <a id="back" class="doc-back" href="./#/notes"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>Uygulamaya dön</a>
   </div>
   <h1>Aydınlatma Metni</h1>
-  <div class="doc-paper">
-    <p>Metin yakında eklenecek.</p>
-  </div>
+  <article class="doc-paper">
+    <p class="doc-date">Son güncelleme: 24.11.2026</p>
+
+    <h2>1. Veri sorumlusu</h2>
+    <p>SimaTech. İletişim: [E-POSTA ADRESİ].</p>
+
+    <h2>2. Kısaca</h2>
+    <p>TakJot notlarınızı kendi sunucularında toplamaz ve saklamaz. Notlarınız yalnızca cihazınızda tutulur. Bulut yedeği kullanmak isteğe bağlıdır.</p>
+
+    <h2>3. Hangi verileriniz, hangi amaçla işlenir?</h2>
+    <ul>
+      <li>Notlarınız (başlık, metin, liste maddeleri, renk, hatırlatma zamanı): cihazınızda saklanır, uygulamanın çalışması için kullanılır. Bize gönderilmez.</li>
+      <li>Google hesap bilgileriniz (e-posta adresi, oturum erişim izni): yalnızca bulut yedeği için Google ile giriş yaparsanız. Amaç, yedeğinizi Google Drive hesabınıza yazmak ve geri okumak. Oturum izni kalıcı saklanmaz.</li>
+      <li>Yedek dosyası: cihazınızda sizin belirlediğiniz yedek şifresiyle şifrelenir, Google Drive'ınızda uygulamaya ait gizli alana kaydedilir. Yedek şifreniz hiçbir yere kaydedilmez.</li>
+      <li>Teknik kayıtlar: uygulamanın sunulduğu barındırma hizmeti (GitHub Pages) erişim kayıtlarını (ör. IP adresi) tutabilir. Bunlara biz erişmeyiz ve sizi kimliğinizle ilişkilendirmeyiz.</li>
+    </ul>
+
+    <h2>4. Hukuki sebep</h2>
+    <ul>
+      <li>Cihazda saklama: uygulamayı kullanmanız (hizmetin sunulması).</li>
+      <li>Bulut yedeği: ilk kez açarken ayrıca vereceğiniz açık rıza. Rızayı istediğiniz an geri alabilirsiniz (Bulut ayarları → Bağlantıyı kes).</li>
+    </ul>
+
+    <h2>5. Verilerin aktarılması</h2>
+    <p>Bulut yedeğini açarsanız yedek dosyası, sizin Google hesabınızdaki Drive'a aktarılır. Google bu veriyi Türkiye dışındaki veri merkezlerinde de işleyebilir. Yedek şifreli olduğu için içeriğini Google da biz de okuyamayız. Verilerinizi üçüncü kişilere satmaz, reklam veya profilleme için kullanmayız.</p>
+
+    <h2>6. Toplama yöntemi</h2>
+    <p>Verileriniz uygulamayı kullanırken, elektronik yolla, sizin girdiğiniz bilgilerle oluşur.</p>
+
+    <h2>7. Haklarınız</h2>
+    <p>Kişisel verinizin işlenip işlenmediğini öğrenme, işlenmişse bilgi isteme, işlenme amacını ve amacına uygun kullanılıp kullanılmadığını öğrenme, yurt içinde veya yurt dışında aktarıldığı üçüncü kişileri bilme, eksik veya yanlış işlenmişse düzeltilmesini isteme, silinmesini veya yok edilmesini isteme ve bunların aktarılan üçüncü kişilere bildirilmesini isteme, otomatik analiz sonucu aleyhinize çıkan sonuca itiraz etme, kanuna aykırı işleme nedeniyle zarara uğrarsanız zararın giderilmesini talep etme haklarına sahipsiniz.</p>
+
+    <h2>8. Başvuru</h2>
+    <p>Taleplerinizi [E-POSTA / KEP / ADRES] üzerinden iletebilirsiniz.</p>
+
+    <h2>9. Önemli uyarılar</h2>
+    <ul>
+      <li>Notlarınıza banka şifresi, kimlik numarası, sağlık bilgisi gibi hassas bilgileri yazmamanızı öneririz. Yazacaksanız "Gizli not" özelliğini ve yedek şifresini kullanın.</li>
+      <li>Yedek şifrenizi veya gizli not şifrenizi unutursanız notlarınız kurtarılamaz.</li>
+      <li>Uygulama, telefonunuzdaki ekran görüntüsü almayı engelleyemez.</li>
+    </ul>
+  </article>
 </main>
 <script>
   // Opened from the app menu: go back to where the user was.

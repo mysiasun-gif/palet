@@ -2,7 +2,7 @@
 // with an optional encrypted backup in the user's own Google Drive (cloud.js).
 import { CloudError, checkPassword, encryptBackup, decryptBackup, createDrive, createAuth, loadGis, gisReady } from './cloud.js';
 import {
-  VaultError, createVault, unlockEntry, sealNote, openNote as unsealNote, wrapWithSecret, unwrapWithSecret, checkSecretPassword,
+  VaultError, createVault, unlockEntry, sealNote, openNote as unsealNote, wrapWithSecret, unwrapWithSecret, checkSecretPassword, SECRET_RULE,
   passwordStrength, lockRemaining, failedTry, cleanEnc, sanitizeVault, exportVault, mergeVault, toB64, fromB64,
 } from './vault.js';
 
@@ -239,6 +239,12 @@ function toLocalInput(ts) {
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+// Whole calendar days until the trash empties this note: "Bugün" on the last day.
+function trashLeftLabel(n, now = Date.now()) {
+  const due = new Date(n.deletedAt + TRASH_DAYS * DAY);
+  const days = Math.round((new Date(due.getFullYear(), due.getMonth(), due.getDate()) - new Date(new Date(now).setHours(0, 0, 0, 0))) / DAY);
+  return days > 0 ? `${days} gün sonra silinecek` : 'Bugün silinecek';
+}
 function noteText(n) {
   return n.type === 'list' ? n.items.map(i => `${i.done ? '[x]' : '[ ]'} ${i.text}`).join('\n') : n.body;
 }
@@ -391,7 +397,10 @@ function cardHtml(n) {
   let preview = '';
   const hidden = isHidden(n);
   if (hidden) {
-    preview = `<p class="card-secret">${icon('lock')}<span>Gizli not</span></p>`;
+    // In the trash a hidden note shows only the lock and how long it has left.
+    preview = n.deletedAt
+      ? `<p class="card-secret only-lock">${icon('lock')}</p>`
+      : `<p class="card-secret">${icon('lock')}<span>Gizli not</span></p>`;
   } else if (n.type === 'list') {
     const open = n.items.filter(i => !i.done && i.text.trim());
     const done = n.items.filter(i => i.done && i.text.trim());
@@ -410,10 +419,7 @@ function cardHtml(n) {
     const past = n.reminderAt < Date.now();
     meta.push(`<span class="card-when${past ? ' past' : ''}">${icon('bell')}${esc(whenLabel(n.reminderAt))}</span>`);
   }
-  if (n.deletedAt) {
-    const left = Math.max(0, Math.ceil((n.deletedAt + TRASH_DAYS * DAY - Date.now()) / DAY));
-    meta.push(`<span class="card-when">${left} gün sonra silinecek</span>`);
-  }
+  if (n.deletedAt) meta.push(`<span class="card-when trash-left">${esc(trashLeftLabel(n))}</span>`);
   const showPin = n.pinned && !n.deletedAt;
   // What holds the note up says what kind it is: a pushpin for pinned notes,
   // a paper clip for lists, a strip of tape for everything else.
@@ -1740,8 +1746,8 @@ function newSecretFields() {
   return `<label class="field-label" for="cf-pw">Şifre</label>
     <input id="cf-pw" name="pw" class="field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off" aria-describedby="cf-strength cf-pw-hint">
     <div class="strength" data-score="0" aria-hidden="true"><i></i><i></i><i></i></div>
-    <p id="cf-strength" class="hint strength-label">En az 6 karakter</p>
-    <p id="cf-pw-hint" class="hint">Sadece rakamlı kısa şifre telefon kopyalanırsa kırılabilir. 8+ karakter, harf ve rakam karışık önerilir.</p>
+    <p id="cf-strength" class="hint strength-label">${SECRET_RULE}</p>
+    <p id="cf-pw-hint" class="hint">Sadece rakamlı şifre telefon kopyalanırsa daha kolay kırılabilir. Harf ve rakam karışık önerilir.</p>
     <label class="field-label" for="cf-pw2">Şifre (tekrar)</label>
     <input id="cf-pw2" name="pw2" class="field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off">
     <label class="consent-row secret-ack"><input type="checkbox" name="ack" value="1"><span class="consent-box" aria-hidden="true">${icon('check')}</span><span>Şifremi unutursam gizli notlarımın kurtarılamayacağını anlıyorum.</span></label>`;
@@ -1755,7 +1761,7 @@ function strengthMeter(form) {
   const update = () => {
     const s = passwordStrength(pw.value);
     bar.dataset.score = pw.value ? String(s.score) : '0';
-    label.textContent = pw.value ? `Şifre gücü: ${s.label}` : 'En az 6 karakter';
+    label.textContent = pw.value ? `Şifre gücü: ${s.label}${s.score ? '' : ` · ${SECRET_RULE}`}` : SECRET_RULE;
   };
   const refresh = () => { ok.disabled = !ack.checked; };
   pw.addEventListener('input', update);
