@@ -22,6 +22,7 @@ const SORTS = {
   title: 'Başlığa göre (A–Z)',
   color: 'Renge göre',
   reminder: 'Hatırlatıcı tarihine göre',
+  manual: 'Elle (sürükle)',
 };
 const KINDS = { all: 'Hepsi', text: 'Notlar', list: 'Listeler', reminder: 'Hatırlatıcılı' };
 const TAPES = ['#F4A6BD', '#F6B26B', '#8FD9C0', '#BBA7EE', '#F3D46B'];
@@ -108,7 +109,15 @@ function sanitize(raw) {
     reminderFired: !!raw.reminderFired,
     createdAt: num(raw.createdAt) ?? t,
     updatedAt: num(raw.updatedAt) ?? t,
+    // Optional manual position; notes saved before it existed simply have none.
+    ...(Number.isFinite(raw.order) ? { order: raw.order } : {}),
   };
+}
+// A position above every manually ordered note, so a new note lands on top.
+function topOrder() {
+  const orders = state.notes.map(n => n.order).filter(Number.isFinite);
+  if (orders.length) return Math.min(...orders) - 1;
+  return state.prefs.sort === 'manual' ? 0 : undefined;
 }
 
 const state = {
@@ -280,6 +289,12 @@ function sortNotes(list) {
     title: (a, b) => noteLabel(a).localeCompare(noteLabel(b), 'tr'),
     color: (a, b) => COLOR_IDS.indexOf(a.color) - COLOR_IDS.indexOf(b.color) || b.updatedAt - a.updatedAt,
     reminder: (a, b) => (a.reminderAt ?? Infinity) - (b.reminderAt ?? Infinity) || b.updatedAt - a.updatedAt,
+    manual: (a, b) => {
+      const ao = Number.isFinite(a.order); const bo = Number.isFinite(b.order);
+      if (ao && bo && a.order !== b.order) return a.order - b.order;
+      if (ao !== bo) return ao ? -1 : 1;
+      return b.updatedAt - a.updatedAt;
+    },
   }[s] ?? ((a, b) => b.updatedAt - a.updatedAt);
   return list.sort(cmp);
 }
@@ -329,7 +344,7 @@ function cardHtml(n) {
   const holder = hold === 'pin' ? '<svg class="holder pin" aria-hidden="true"><use href="#d-pushpin"/></svg>'
     : hold === 'clip' ? '<svg class="holder clip" aria-hidden="true"><use href="#d-clip"/></svg>'
       : `<span class="holder tape" aria-hidden="true" style="--tape:${TAPES[(h >>> 4) % TAPES.length]};--tape-tilt:${((h >>> 12) % 9) - 4}deg"></span>`;
-  return `<article class="card${curl}" data-hold="${hold}" style="--c:var(--n-${n.color});--tilt:${tilt}deg">
+  return `<article class="card${curl}" data-id="${esc(n.id)}" data-hold="${hold}" style="--c:var(--n-${n.color});--tilt:${tilt}deg">
     <button class="card-hit" type="button" data-open="${esc(n.id)}" aria-label="${esc(noteLabel(n))}, ${colorName(n.color)} not${n.pinned ? ', sabitlenmiş' : ''}${n.type === 'list' ? ', liste' : ''}"></button>
     ${holder}
     ${n.title.trim() ? `<h3 class="card-title">${esc(n.title)}</h3>` : ''}
@@ -347,8 +362,11 @@ function emptyHtml(scoped) {
   if (state.query) {
     return `<div class="empty">${emptyArt(['gray'])}<h2>Sonuç yok</h2><p>“${esc(state.query)}” hiçbir notta geçmiyor${v === 'notes' ? '' : ` (${VIEWS[v].toLocaleLowerCase('tr')})`}. Arşivi ya da çöp kutusunu da kontrol edebilirsin.</p><button class="btn outline" type="button" data-act="clear-search">Aramayı temizle</button></div>`;
   }
+  if (state.kind === 'list' && !state.filterColor && v === 'notes') {
+    return `<div class="empty">${emptyArt(['green'])}<h2>Henüz liste yok</h2><p>+ düğmesine dokun, boş bir liste açılsın. Yazdığın bir notu da editördeki Liste düğmesiyle listeye çevirebilirsin.</p><div class="empty-actions"><button class="btn primary" type="button" data-act="new">${icon('plus')}Liste ekle</button>${scoped.length ? '<button class="btn outline" type="button" data-act="clear-kind">Hepsini göster</button>' : ''}</div></div>`;
+  }
   if (state.kind !== 'all' && scoped.length && !state.filterColor) {
-    return `<div class="empty">${emptyArt(['green'])}<h2>Burada ${KINDS[state.kind].toLocaleLowerCase('tr')} not yok</h2><p>${state.kind === 'reminder' ? 'Bir notta zil simgesine dokunarak hatırlatıcı kurabilirsin.' : state.kind === 'list' ? 'Bir notu listeye çevirmek için notun menüsünü kullan.' : 'Bu bölümdeki notların hepsi liste.'}</p><button class="btn outline" type="button" data-act="clear-kind">Hepsini göster</button></div>`;
+    return `<div class="empty">${emptyArt(['green'])}<h2>Burada ${KINDS[state.kind].toLocaleLowerCase('tr')} not yok</h2><p>${state.kind === 'reminder' ? 'Bir notta zil simgesine dokunarak hatırlatıcı kurabilirsin.' : state.kind === 'list' ? 'Bu bölümde liste yok.' : 'Bu bölümdeki notların hepsi liste.'}</p><button class="btn outline" type="button" data-act="clear-kind">Hepsini göster</button></div>`;
   }
   if (state.filterColor && scoped.length) {
     return `<div class="empty">${emptyArt([state.filterColor])}<h2>${colorName(state.filterColor)} not yok</h2><p>Bu bölümde bu renkte not bulunmuyor.</p><button class="btn outline" type="button" data-act="clear-filter">Tüm renkleri göster</button></div>`;
@@ -456,6 +474,8 @@ const sortByTime = (list, key) => list.sort((a, b) => a[key] - b[key]);
 
 /* ---------- Render ---------- */
 function render() {
+  // Never rebuild the board under a note the user is holding; catch up on drop.
+  if (drag) { drag.renderPending = true; return; }
   $('#view-title').textContent = VIEWS[state.view];
   document.querySelectorAll('.tab').forEach(t => {
     if (t.dataset.view === state.view) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
@@ -463,6 +483,7 @@ function render() {
   const isCal = state.view === 'calendar';
   $('#search-row').hidden = isCal;
   $('#fab').hidden = state.view === 'trash' || state.view === 'archive';
+  $('#fab').setAttribute('aria-label', state.view === 'notes' && state.kind === 'list' ? 'Yeni liste' : 'Yeni not');
   renderPalette();
   const main = $('#view');
   if (isCal) renderCalendar(main); else renderList(main);
@@ -472,12 +493,19 @@ function render() {
 const ed = {
   root: $('#editor'), title: $('#ed-title'), body: $('#ed-body'), list: $('#ed-list'),
   chip: $('#ed-chip'), stamp: $('#ed-stamp'), colors: $('#ed-colors'),
-  pin: $('#ed-pin'), archive: $('#ed-archive'),
+  pin: $('#ed-pin'), archive: $('#ed-archive'), type: $('#ed-type'),
 };
 let saveTimer = null;
 
 function newNote() {
   const extra = { color: state.filterColor ?? state.prefs.lastColor ?? 'yellow' };
+  const order = topOrder();
+  if (order !== undefined) extra.order = order;
+  // With the "Listeler" filter on, + starts a checklist with one empty item.
+  if (state.view === 'notes' && state.kind === 'list') {
+    extra.type = 'list';
+    extra.items = [{ id: uid(), text: '', done: false }];
+  }
   if (state.view === 'calendar' && state.calDay !== dayKey(Date.now())) {
     const d = keyToDate(state.calDay);
     d.setHours(9, 0, 0, 0);
@@ -516,6 +544,8 @@ function renderEditor() {
   ed.pin.innerHTML = icon(n.pinned ? 'pin-fill' : 'pin');
   ed.archive.setAttribute('aria-label', n.archived ? 'Arşivden çıkar' : 'Arşivle');
   ed.archive.innerHTML = icon(n.archived ? 'unarchive' : 'archive');
+  ed.type.setAttribute('aria-pressed', String(n.type === 'list'));
+  ed.type.title = n.type === 'list' ? 'Düz metne dönüştür' : 'Yapılacaklar listesine dönüştür';
   if (n.reminderAt) {
     const past = n.reminderAt < Date.now();
     ed.chip.hidden = false;
@@ -926,6 +956,191 @@ $('#view').addEventListener('click', async e => {
   }
 });
 
+/* ---------- Manual order: hold (touch) or drag (mouse) a note to move it ---------- */
+const LIFT_DELAY = 350;   // touch: hold this long before the note lifts
+const SLOP_TOUCH = 8;     // touch: moving further than this before the lift means "scroll"
+const SLOP_MOUSE = 5;     // mouse: the drag starts once the pointer travels this far
+const SETTLE_MS = 200;
+const EASE_OUT = 'cubic-bezier(0.23, 1, 0.32, 1)';
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+let press = null;         // a pointer down on a note that has not lifted it yet
+let drag = null;          // the note being moved
+let swallowClick = false; // the click that ends a drag must not open the note
+
+// Untransformed page position, so in-flight animations never skew the maths.
+function layoutPos(el) {
+  let x = 0; let y = 0;
+  for (let n = el; n; n = n.offsetParent) { x += n.offsetLeft; y += n.offsetTop; }
+  return { x, y, w: el.offsetWidth, h: el.offsetHeight };
+}
+const isFiltered = () => !!(state.query.trim() || state.filterColor || state.kind !== 'all');
+
+function cancelPress() {
+  if (press) clearTimeout(press.timer);
+  press = null;
+}
+function tryLift(p, cx, cy) {
+  cancelPress();
+  if (!p.card.isConnected || state.view !== 'notes') return;
+  swallowClick = true;
+  if (isFiltered()) { toast('Notları sıralamak için önce aramayı ve süzgeçleri kapat.'); return; }
+  const card = p.card;
+  const pos = layoutPos(card);
+  drag = {
+    card, box: card.parentElement, pointerId: p.id,
+    grabX: cx + scrollX - pos.x, grabY: cy + scrollY - pos.y,
+    cx, cy, raf: 0, renderPending: false, switched: false,
+  };
+  // Starting a drag under another sort switches to manual; what is on screen
+  // now becomes the starting order (saved on drop).
+  if (state.prefs.sort !== 'manual') { state.prefs.sort = 'manual'; savePrefs(); drag.switched = true; }
+  card.classList.add('lifted');
+  document.body.classList.add('dragging-note');
+  if (p.type !== 'mouse') navigator.vibrate?.(8);
+  drag.raf = requestAnimationFrame(autoScroll);
+}
+
+// Which slot the held note's centre points at, or null when it should stay put.
+function findSlot(d, midX, midY) {
+  const sibs = [...d.box.children];
+  const cur = sibs.indexOf(d.card);
+  if (d.box.classList.contains('rows')) {
+    // One column: the slot is the number of other notes whose middle is above ours.
+    // Moving the note shifts those middles away from it, so this never flip-flops.
+    const idx = sibs.filter(s => s !== d.card).filter(s => { const p = layoutPos(s); return p.y + p.h / 2 < midY; }).length;
+    return idx === cur ? null : idx;
+  }
+  let best = null; let bestD = Infinity;
+  sibs.forEach(s => {
+    const p = layoutPos(s);
+    const dist = Math.hypot(p.x + p.w / 2 - midX, p.y + p.h / 2 - midY);
+    if (dist < bestD) { bestD = dist; best = s; }
+  });
+  return !best || best === d.card ? null : sibs.indexOf(best);
+}
+
+// Move the held note to slot idx and glide the others into their new places (FLIP).
+function reorder(d, idx) {
+  const sibs = [...d.box.children].filter(c => c !== d.card);
+  const before = sibs.map(s => s.getBoundingClientRect());
+  d.box.insertBefore(d.card, sibs[idx] ?? null);
+  if (reduceMotion.matches) return;
+  sibs.forEach(s => s.getAnimations().forEach(a => { if (a.id === 'reflow') a.cancel(); }));
+  const after = sibs.map(s => s.getBoundingClientRect());
+  sibs.forEach((s, i) => {
+    const dx = before[i].left - after[i].left;
+    const dy = before[i].top - after[i].top;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+    s.animate([{ translate: `${dx}px ${dy}px` }, { translate: '0px 0px' }], { duration: SETTLE_MS, easing: EASE_OUT, id: 'reflow' });
+  });
+}
+
+// Track phase: the note sits exactly under the finger, no easing.
+function moveDrag() {
+  const d = drag;
+  const left = d.cx + scrollX - d.grabX;
+  const top = d.cy + scrollY - d.grabY;
+  let pos = layoutPos(d.card);
+  const idx = findSlot(d, left + pos.w / 2, top + pos.h / 2);
+  if (idx !== null) { reorder(d, idx); pos = layoutPos(d.card); }
+  d.card.style.translate = `${left - pos.x}px ${top - pos.y}px`;
+}
+
+// Near the top or bottom edge, the page scrolls on its own, faster the closer you get.
+function autoScroll() {
+  const d = drag;
+  if (!d) return;
+  const edge = 72;
+  const tabs = $('.tabs').getBoundingClientRect();
+  const bottom = tabs.top > innerHeight / 2 ? tabs.top : innerHeight;
+  let v = 0;
+  if (d.cy < edge) v = (d.cy - edge) / edge;
+  else if (d.cy > bottom - edge) v = (d.cy - (bottom - edge)) / edge;
+  if (v) {
+    const y0 = scrollY;
+    window.scrollBy(0, Math.max(-1, Math.min(1, v)) * 16);
+    if (scrollY !== y0) moveDrag();
+  }
+  d.raf = requestAnimationFrame(autoScroll);
+}
+
+async function endDrag() {
+  const d = drag;
+  if (!d) return;
+  cancelAnimationFrame(d.raf);
+  const [tx = 0, ty = 0] = (d.card.style.translate || '').split(' ').map(parseFloat);
+  d.card.style.translate = '';
+  d.card.classList.remove('lifted');
+  document.body.classList.remove('dragging-note');
+  // Release phase: settle into the slot from wherever the finger let go.
+  if (!reduceMotion.matches && (tx || ty)) {
+    d.card.animate([{ translate: `${tx}px ${ty}px` }, { translate: '0px 0px' }], { duration: SETTLE_MS, easing: EASE_OUT });
+  }
+  drag = null;
+  await saveManualOrder();
+  if (d.switched) toast('Sıralama “Elle (sürükle)” olarak değişti');
+  if (d.renderPending) render();
+}
+
+// The board as it now stands becomes the order. Only the position changes:
+// updatedAt stays as it was.
+async function saveManualOrder() {
+  const changed = [];
+  [...$('#view').querySelectorAll('.notes .card')].forEach((c, i) => {
+    const n = state.notes.find(x => x.id === c.dataset.id);
+    if (n && n.order !== i) { n.order = i; changed.push(n); }
+  });
+  if (!changed.length) return;
+  try { await dbPutMany(changed); requestPersist(); }
+  catch (err) { console.error(err); toast('Sıra kaydedilemedi. Depolama alanını kontrol edip tekrar dene.'); }
+}
+
+$('#view').addEventListener('pointerdown', e => {
+  swallowClick = false;
+  if (drag || press || !e.isPrimary || state.view !== 'notes') return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  const card = e.target.closest('.notes .card');
+  if (!card) return;
+  const p = { card, id: e.pointerId, type: e.pointerType, x: e.clientX, y: e.clientY, timer: 0 };
+  // Touch waits for a hold, so a swipe that starts on a note still scrolls the page.
+  if (p.type !== 'mouse') p.timer = setTimeout(() => { if (press === p) tryLift(p, p.x, p.y); }, LIFT_DELAY);
+  press = p;
+});
+window.addEventListener('pointermove', e => {
+  if (drag) {
+    if (e.pointerId !== drag.pointerId) return;
+    drag.cx = e.clientX; drag.cy = e.clientY;
+    moveDrag();
+    return;
+  }
+  if (!press || e.pointerId !== press.id) return;
+  const p = press;
+  const dist = Math.hypot(e.clientX - p.x, e.clientY - p.y);
+  if (p.type !== 'mouse') { if (dist > SLOP_TOUCH) cancelPress(); return; }
+  if (dist <= SLOP_MOUSE) return;
+  // Grab where the button went down, then catch up to the pointer at once.
+  tryLift(p, p.x, p.y);
+  if (drag) { drag.cx = e.clientX; drag.cy = e.clientY; moveDrag(); }
+});
+function onPointerEnd(e) {
+  if (drag && e.pointerId === drag.pointerId) endDrag();
+  else if (press && e.pointerId === press.id) cancelPress();
+  // Only the click that belongs to this gesture is swallowed; if none comes,
+  // the next click (say, Enter on a note) must still work.
+  if (swallowClick) setTimeout(() => { swallowClick = false; }, 400);
+}
+window.addEventListener('pointerup', onPointerEnd);
+window.addEventListener('pointercancel', onPointerEnd);
+// Once a note is lifted the finger moves the note, not the page.
+document.addEventListener('touchmove', e => { if (drag && e.cancelable) e.preventDefault(); }, { passive: false });
+$('#view').addEventListener('contextmenu', e => { if (drag || press) e.preventDefault(); });
+$('#view').addEventListener('click', e => {
+  if (!swallowClick) return;
+  swallowClick = false;
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
+
 function trashMenu(n) {
   showSheet(noteLabel(n), [
     { icon: 'restore', label: 'Geri yükle', run: async () => { n.deletedAt = null; await saveNote(n, { touch: false }); render(); toast(n.archived ? 'Not arşive geri yüklendi' : 'Not geri yüklendi'); } },
@@ -971,6 +1186,20 @@ ed.archive.addEventListener('click', async () => {
   leaveEditor();
 });
 $('#ed-more').addEventListener('click', editorMenu);
+ed.type.addEventListener('click', () => {
+  if (!state.editing) return;
+  convertType();
+  const n = state.editing;
+  requestAnimationFrame(() => {
+    if (n.type === 'list') {
+      const open = n.items.filter(i => !i.done);
+      if (open.length) focusItem(open[open.length - 1].id);
+    } else {
+      ed.body.focus();
+      ed.body.setSelectionRange(ed.body.value.length, ed.body.value.length);
+    }
+  });
+});
 ed.colors.addEventListener('click', e => {
   const c = e.target.closest('[data-swatch]')?.dataset.swatch;
   if (!c) return;
