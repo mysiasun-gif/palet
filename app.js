@@ -1,6 +1,10 @@
 // Palet: colour notes, checklists and reminders. Data stays on the device (IndexedDB),
 // with an optional encrypted backup in the user's own Google Drive (cloud.js).
 import { CloudError, checkPassword, encryptBackup, decryptBackup, createDrive, createAuth, loadGis, gisReady } from './cloud.js';
+import {
+  VaultError, createVault, unlockEntry, sealNote, openNote as unsealNote, wrapWithSecret, unwrapWithSecret, checkSecretPassword,
+  passwordStrength, lockRemaining, failedTry, cleanEnc, sanitizeVault, exportVault, mergeVault, toB64, fromB64,
+} from './vault.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 
@@ -26,7 +30,7 @@ const SORTS = {
   reminder: 'Hatırlatıcı tarihine göre',
   manual: 'Elle (sürükle)',
 };
-const KINDS = { all: 'Hepsi', text: 'Notlar', list: 'Listeler', reminder: 'Hatırlatıcılı' };
+const KINDS = { all: 'Hepsi', text: 'Notlar', list: 'Listeler', reminder: 'Hatırlatıcılı', secret: 'Gizli' };
 const TAPES = ['#F4A6BD', '#F6B26B', '#8FD9C0', '#BBA7EE', '#F3D46B'];
 const THEMES = { system: 'Sistem ayarı', light: 'Açık', dark: 'Koyu' };
 const TRASH_DAYS = 30;
@@ -34,7 +38,7 @@ const DAY = 86400000;
 
 /* ---------- Preferences (per device convenience) ---------- */
 const PREF_KEY = 'palet.prefs';
-const DEFAULT_PREFS = { layout: 'grid', sort: 'updated', theme: 'system', lastColor: 'yellow' };
+const DEFAULT_PREFS = { layout: 'grid', sort: 'updated', theme: 'system', lastColor: 'yellow', secretAfter: 0 };
 // Cloud settings kept on the device. Never the token or the password: those live only in memory.
 const DEFAULT_CLOUD = { connected: false, email: '', setup: false, encrypt: true, auto: false, lastBackupAt: 0, lastHash: '' };
 // Read before anything is saved: settings from an earlier visit mean this is not a first run.
@@ -53,32 +57,57 @@ function savePrefs() {
 /* ---------- IndexedDB ---------- */
 const DB_NAME = 'palet';
 const STORE = 'notes';
+const META = 'meta';   // version 2: the hidden-note vault record lives here; notes are untouched
 let dbPromise;
 function openDb() {
   dbPromise ??= new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'id' });
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    const req = indexedDB.open(DB_NAME, 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(META)) db.createObjectStore(META, { keyPath: 'id' });
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => { db.close(); dbPromise = null; };
+      resolve(db);
+    };
+    req.onerror = () => { dbPromise = null; reject(req.error); };
   });
   return dbPromise;
 }
-async function tx(mode, fn) {
+// One transaction. If fn throws, the transaction is aborted, so nothing it started is kept.
+async function tx(mode, fn, stores = STORE) {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const t = db.transaction(STORE, mode);
-    const req = fn(t.objectStore(STORE));
+    const t = db.transaction(stores, mode);
+    let req;
+    try {
+      req = Array.isArray(stores) ? fn(...stores.map(s => t.objectStore(s))) : fn(t.objectStore(stores));
+    } catch (err) {
+      try { t.abort(); } catch { /* already finished */ }
+      reject(err);
+      return;
+    }
     t.oncomplete = () => resolve(req?.result);
     t.onerror = () => reject(t.error);
-    t.onabort = () => reject(t.error);
+    t.onabort = () => reject(t.error ?? new DOMException('aborted', 'AbortError'));
   });
 }
 const dbAll = () => tx('readonly', s => s.getAll());
 const dbPut = note => tx('readwrite', s => s.put(note));
 const dbDelete = id => tx('readwrite', s => s.delete(id));
 const dbPutMany = notes => tx('readwrite', s => { notes.forEach(n => s.put(n)); });
-// One transaction: if anything fails, IndexedDB rolls back and the old notes stay.
-const dbReplaceAll = notes => tx('readwrite', s => { s.clear(); notes.forEach(n => s.put(n)); });
+const dbGetVault = () => tx('readonly', s => s.get('vault'), META);
+// Notes and the vault record in one transaction: all of it is written, or none of it.
+// vault: an object to save, null to remove it, undefined to leave it as it is.
+// replace: the notes store becomes exactly these notes.
+const dbWrite = (notes, vault, { replace = false, removeIds = [] } = {}) => tx('readwrite', (ns, ms) => {
+  if (replace) ns.clear();
+  removeIds.forEach(id => ns.delete(id));
+  notes.forEach(n => ns.put(n));
+  if (vault) ms.put(vault); else if (vault === null) ms.delete('vault');
+}, [STORE, META]);
 
 let persistAsked = false;
 function requestPersist() {
@@ -98,12 +127,14 @@ function createNote(extra = {}) {
     reminderAt: null, reminderFired: false, createdAt: t, updatedAt: t, ...extra,
   };
 }
-const isEmpty = n => !n.title.trim() && !n.body.trim() && !n.items.some(i => i.text.trim());
+const isHidden = n => !!n?.enc;
+const isEmpty = n => !n.enc && !n.title.trim() && !n.body.trim() && !n.items.some(i => i.text.trim());
 
 function sanitize(raw) {
   if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string') return null;
   const num = v => (Number.isFinite(v) ? v : null);
   const t = Date.now();
+  const enc = cleanEnc(raw.enc);
   return {
     id: raw.id.slice(0, 80),
     type: raw.type === 'list' ? 'list' : 'text',
@@ -122,6 +153,8 @@ function sanitize(raw) {
     updatedAt: num(raw.updatedAt) ?? t,
     // Optional manual position; notes saved before it existed simply have none.
     ...(Number.isFinite(raw.order) ? { order: raw.order } : {}),
+    // A hidden note: content only in enc; the plain fields stay empty.
+    ...(enc ? { type: 'text', title: '', body: '', items: [], enc } : {}),
   };
 }
 // A position above every manually ordered note, so a new note lands on top.
@@ -140,6 +173,7 @@ const state = {
   query: '',
   editing: null,
   openedFromApp: false,
+  openSecret: null,       // the unlocked copy of a hidden note about to open in the editor
   doneOpen: true,
   calMonth: startOfMonth(new Date()),
   calDay: dayKey(Date.now()),
@@ -149,10 +183,19 @@ const findNote = id => state.notes.find(n => n.id === id) ?? (state.pending?.id 
 
 async function saveNote(n, { touch = true } = {}) {
   if (touch) n.updatedAt = Date.now();
-  const i = state.notes.findIndex(x => x.id === n.id);
-  if (i < 0) state.notes.push(n); else state.notes[i] = n;
+  let rec = n;
+  if (n.secret) {
+    // An open hidden note: only its sealed form is kept in the list and written to disk.
+    try { rec = await sealedRecord(n); } catch (err) {
+      console.error(err?.name ?? 'seal');
+      toast('Gizli not kaydedilemedi. Notu kapatmadan bir daha dene.');
+      return;
+    }
+  }
+  const i = state.notes.findIndex(x => x.id === rec.id);
+  if (i < 0) state.notes.push(rec); else state.notes[i] = rec;
   if (state.pending?.id === n.id) state.pending = null;
-  try { await dbPut(n); } catch (err) { console.error(err); toast('Not kaydedilemedi. Depolama alanını kontrol edip tekrar dene.'); }
+  try { await dbPut(rec); } catch (err) { console.error(err?.name ?? 'save'); toast('Not kaydedilemedi. Depolama alanını kontrol edip tekrar dene.'); }
   requestPersist();
   scheduleAutoBackup();
 }
@@ -200,6 +243,7 @@ function noteText(n) {
   return n.type === 'list' ? n.items.map(i => `${i.done ? '[x]' : '[ ]'} ${i.text}`).join('\n') : n.body;
 }
 function noteLabel(n) {
+  if (isHidden(n)) return 'Gizli not';
   const first = (n.title || (n.type === 'list' ? n.items[0]?.text : n.body.split('\n')[0]) || '').trim();
   return first ? first.slice(0, 60) : 'Başlıksız not';
 }
@@ -224,7 +268,7 @@ function toast(msg, action) {
 function hideToast() { $('#toast').hidden = true; }
 
 /* ---------- Dialog helpers ---------- */
-// items: { icon, label, sub?, dot?, danger?, checked? (radio), toggle? (switch), keep? (stay open), run }
+// items: { icon, label, sub?, dot?, danger?, disabled?, checked? (radio), toggle? (switch), keep? (stay open), run }
 function showSheet(title, items, { brand = false, info = '', onClose } = {}) {
   const dlg = $('#dlg-sheet');
   $('#sheet-brand').hidden = !brand;
@@ -245,6 +289,7 @@ function showSheet(title, items, { brand = false, info = '', onClose } = {}) {
     b.innerHTML = `${icon(it.icon)}${label}${end}`;
     if (it.checked !== undefined) { b.setAttribute('role', 'menuitemradio'); b.setAttribute('aria-checked', String(!!it.checked)); }
     if (it.toggle !== undefined) { b.setAttribute('role', 'switch'); b.setAttribute('aria-checked', String(!!it.toggle)); }
+    if (it.disabled) b.disabled = true;
     b.addEventListener('click', () => { if (!it.keep) dlg.close(); it.run(b); });
     box.appendChild(b);
   });
@@ -337,12 +382,17 @@ function hashStr(str) {
 }
 function matchesKind(n) {
   const k = state.kind;
-  return k === 'all' || (k === 'reminder' ? !!n.reminderAt : n.type === k);
+  if (k === 'secret') return isHidden(n);
+  if (k === 'reminder') return !!n.reminderAt;
+  return k === 'all' || (n.type === k && !isHidden(n));
 }
 
 function cardHtml(n) {
   let preview = '';
-  if (n.type === 'list') {
+  const hidden = isHidden(n);
+  if (hidden) {
+    preview = `<p class="card-secret">${icon('lock')}<span>Gizli not</span></p>`;
+  } else if (n.type === 'list') {
     const open = n.items.filter(i => !i.done && i.text.trim());
     const done = n.items.filter(i => i.done && i.text.trim());
     const shown = open.slice(0, 5);
@@ -374,10 +424,10 @@ function cardHtml(n) {
   const holder = hold === 'pin' ? '<svg class="holder pin" aria-hidden="true"><use href="#d-pushpin"/></svg>'
     : hold === 'clip' ? '<svg class="holder clip" aria-hidden="true"><use href="#d-clip"/></svg>'
       : `<span class="holder tape" aria-hidden="true" style="--tape:${TAPES[(h >>> 4) % TAPES.length]};--tape-tilt:${((h >>> 12) % 9) - 4}deg"></span>`;
-  return `<article class="card${curl}" data-id="${esc(n.id)}" data-hold="${hold}" style="--c:var(--n-${n.color});--tilt:${tilt}deg">
-    <button class="card-hit" type="button" data-open="${esc(n.id)}" aria-label="${esc(noteLabel(n))}, ${colorName(n.color)} not${n.pinned ? ', sabitlenmiş' : ''}${n.type === 'list' ? ', liste' : ''}"></button>
+  return `<article class="card${curl}${hidden ? ' secret' : ''}" data-id="${esc(n.id)}" data-hold="${hold}" style="--c:var(--n-${n.color});--tilt:${tilt}deg">
+    <button class="card-hit" type="button" data-open="${esc(n.id)}" aria-label="${hidden ? `Gizli not, ${colorName(n.color)}${n.pinned ? ', sabitlenmiş' : ''}, açmak için şifre gerekir` : `${esc(noteLabel(n))}, ${colorName(n.color)} not${n.pinned ? ', sabitlenmiş' : ''}${n.type === 'list' ? ', liste' : ''}`}"></button>
     ${holder}
-    ${n.title.trim() ? `<h3 class="card-title">${esc(n.title)}</h3>` : ''}
+    ${!hidden && n.title.trim() ? `<h3 class="card-title">${esc(n.title)}</h3>` : ''}
     ${preview || (n.title.trim() ? '' : '<p class="card-body">Boş not</p>')}
     ${meta.length ? `<div class="card-meta">${meta.join('')}</div>` : ''}
   </article>`;
@@ -396,7 +446,7 @@ function emptyHtml(scoped) {
     return `<div class="empty">${emptyArt(['green'])}<h2>Henüz liste yok</h2><p>+ düğmesine dokun, boş bir liste açılsın. Yazdığın bir notu da editördeki Liste düğmesiyle listeye çevirebilirsin.</p><div class="empty-actions"><button class="btn primary" type="button" data-act="new">${icon('plus')}Liste ekle</button>${scoped.length ? '<button class="btn outline" type="button" data-act="clear-kind">Hepsini göster</button>' : ''}</div></div>`;
   }
   if (state.kind !== 'all' && scoped.length && !state.filterColor) {
-    return `<div class="empty">${emptyArt(['green'])}<h2>Burada ${KINDS[state.kind].toLocaleLowerCase('tr')} not yok</h2><p>${state.kind === 'reminder' ? 'Bir notta zil simgesine dokunarak hatırlatıcı kurabilirsin.' : state.kind === 'list' ? 'Bu bölümde liste yok.' : 'Bu bölümdeki notların hepsi liste.'}</p><button class="btn outline" type="button" data-act="clear-kind">Hepsini göster</button></div>`;
+    return `<div class="empty">${emptyArt(['green'])}<h2>Burada ${KINDS[state.kind].toLocaleLowerCase('tr')} not yok</h2><p>${state.kind === 'reminder' ? 'Bir notta zil simgesine dokunarak hatırlatıcı kurabilirsin.' : state.kind === 'secret' ? 'Bir notu gizlemek için notu aç, ⋮ menüsünden “Gizli yap”ı seç.' : state.kind === 'list' ? 'Bu bölümde liste yok.' : 'Bu bölümdeki notların hepsi liste.'}</p><button class="btn outline" type="button" data-act="clear-kind">Hepsini göster</button></div>`;
   }
   if (state.filterColor && scoped.length) {
     return `<div class="empty">${emptyArt([state.filterColor])}<h2>${colorName(state.filterColor)} not yok</h2><p>Bu bölümde bu renkte not bulunmuyor.</p><button class="btn outline" type="button" data-act="clear-filter">Tüm renkleri göster</button></div>`;
@@ -417,7 +467,9 @@ function renderPalette() {
   el.hidden = kinds.hidden = isCal;
   if (isCal) return;
   const scoped = scopeNotes(state.view);
-  kinds.innerHTML = Object.entries(KINDS).map(([k, label]) =>
+  // The "Gizli" tab appears once there is a hidden note.
+  const showSecret = state.kind === 'secret' || state.notes.some(isHidden);
+  kinds.innerHTML = Object.entries(KINDS).filter(([k]) => k !== 'secret' || showSecret).map(([k, label]) =>
     `<button class="kind" type="button" data-kind="${k}" aria-pressed="${state.kind === k}">${label}</button>`).join('');
   const counts = Object.fromEntries(COLOR_IDS.map(c => [c, 0]));
   scoped.forEach(n => { counts[n.color]++; });
@@ -547,7 +599,18 @@ function newNote() {
 
 function openEditor(id) {
   if (state.editing && saveTimer) commit(); // flush the note being switched away from
-  const n = findNote(id);
+  let n = findNote(id);
+  if (isHidden(n)) {
+    // A hidden note opens only from its unlocked copy; a link or reload asks for the password first.
+    const open = state.openSecret?.id === id && sec.key ? state.openSecret : null;
+    state.openSecret = null;
+    if (!open) {
+      location.replace(`#/${state.view}`);
+      if (!n.deletedAt) setTimeout(() => openHidden(n), 0);
+      return;
+    }
+    n = open;
+  }
   if (!n || n.deletedAt) { location.replace(`#/${state.view}`); return; }
   state.editing = n;
   ed.title.value = n.title;
@@ -568,6 +631,7 @@ function openEditor(id) {
 function renderEditor() {
   const n = state.editing;
   ed.root.style.setProperty('--c', `var(--n-${n.color})`);
+  ed.root.classList.toggle('secret', !!n.secret);
   syncStatusBar();
   ed.pin.setAttribute('aria-pressed', String(n.pinned));
   ed.pin.setAttribute('aria-label', n.pinned ? 'Sabitlemeyi kaldır' : 'Sabitle');
@@ -595,7 +659,8 @@ function renderEditor() {
 function updateStamp() {
   const n = state.editing;
   if (!n) return;
-  ed.stamp.textContent = state.pending?.id === n.id ? 'Yeni not' : `Düzenlendi: ${whenLabel(n.updatedAt)}`;
+  const text = state.pending?.id === n.id ? 'Yeni not' : `Düzenlendi: ${whenLabel(n.updatedAt)}`;
+  ed.stamp.innerHTML = n.secret ? `${icon('lock')}<span>Gizli not · ${esc(text)}</span>` : esc(text);
 }
 
 function renderItems() {
@@ -642,6 +707,12 @@ function closeEditor() {
   if (n && state.pending?.id === n.id && isEmpty(n)) state.pending = null;
   state.editing = null;
   state.openedFromApp = false;
+  state.openSecret = null;
+  if (n?.secret) {
+    // Nothing of a hidden note stays in the page once it is closed.
+    ed.title.value = ''; ed.body.value = ''; ed.list.innerHTML = ''; ed.stamp.textContent = '';
+    ed.root.classList.remove('secret');
+  }
   ed.root.hidden = true;
   document.body.style.overflow = '';
   syncStatusBar();
@@ -721,7 +792,7 @@ async function shareNote(n) {
 
 function editorMenu() {
   const n = state.editing;
-  showSheet('Not', [
+  showSheet(n.secret ? 'Gizli not' : 'Not', [
     { icon: n.type === 'text' ? 'checklist' : 'text', label: n.type === 'text' ? 'Yapılacaklar listesine dönüştür' : 'Düz metne dönüştür', run: convertType },
     { icon: 'share', label: 'Paylaş', run: () => shareNote(n) },
     {
@@ -731,12 +802,22 @@ function editorMenu() {
         const t = Date.now();
         const copy = { ...structuredClone(n), id: uid(), title: n.title ? `${n.title} (kopya)` : '', pinned: false, reminderAt: null, reminderFired: false, createdAt: t, updatedAt: t, items: n.items.map(i => ({ ...i, id: uid() })) };
         await saveNote(copy);
+        if (copy.secret) state.openSecret = copy; // the copy of a hidden note is hidden too
         state.openedFromApp = true;
         location.replace(`#/note/${encodeURIComponent(copy.id)}`);
         toast('Kopya oluşturuldu');
       },
     },
-    { icon: 'trash', label: 'Sil', danger: true, run: async () => { await commitOrDiscard(n); leaveEditor(); } },
+    n.secret
+      ? { icon: 'unlock', label: 'Gizliyi kaldır', run: () => unhideNote(n) }
+      : { icon: 'lock', label: 'Gizli yap', sub: 'İçerik şifrelenir, listede kilitli görünür', run: () => makeHidden(n) },
+    {
+      icon: 'trash', label: 'Sil', danger: true, run: async () => {
+        if (n.secret && !(await confirmSecret({ kid: sec.meta?.current, title: 'Gizli notu sil', text: 'Gizli not çöp kutusuna taşınacak. Onaylamak için gizli not şifreni gir.', action: 'Sil' }))) return;
+        await commitOrDiscard(n);
+        leaveEditor();
+      },
+    },
   ]);
 }
 async function commitOrDiscard(n) {
@@ -760,10 +841,13 @@ function scheduleReminders() {
   });
 }
 async function fireReminder(n) {
+  n = state.notes.find(x => x.id === n.id) ?? n; // a hidden note's record is replaced on every save
   n.reminderFired = true;
+  if (state.editing?.id === n.id) state.editing.reminderFired = true;
   await saveNote(n, { touch: false });
+  // A hidden note's notification never shows its content.
   const title = noteLabel(n);
-  const body = n.title ? noteText(n).slice(0, 140) : `Hatırlatıcı: ${whenLabel(n.reminderAt)}`;
+  const body = isHidden(n) ? '' : n.title ? noteText(n).slice(0, 140) : `Hatırlatıcı: ${whenLabel(n.reminderAt)}`;
   let shown = false;
   if ('Notification' in window && Notification.permission === 'granted') {
     try {
@@ -833,7 +917,12 @@ $('#dlg-remind').addEventListener('close', async () => {
 
 /* ---------- Backup ---------- */
 // The same data goes into the file backup and the cloud backup.
-const backupData = () => ({ app: 'palet', version: 1, exportedAt: new Date().toISOString(), notes: state.notes });
+// Hidden notes stay sealed in it; the vault (salts, wrapped keys, check blocks) travels along so
+// they can be opened on another device with their password.
+const backupData = () => ({
+  app: 'palet', version: 1, exportedAt: new Date().toISOString(), notes: state.notes,
+  ...(sec.meta ? { vault: exportVault(sec.meta) } : {}),
+});
 function exportBackup() {
   const data = backupData();
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -854,38 +943,55 @@ async function importBackup(data, { replace = false } = {}) {
   const raw = Array.isArray(data) ? data : data?.notes;
   if (!Array.isArray(raw)) throw new Error('format');
   const incoming = [...new Map(raw.map(sanitize).filter(Boolean).map(n => [n.id, n])).values()];
+  const inVault = sanitizeVault(data?.vault, { keepBio: false });
+  if (state.editing && saveTimer) await commit();
   let added = 0; let updated = 0;
+  const toWrite = [];
   if (replace) {
-    await dbReplaceAll(incoming);
-    state.notes = incoming;
+    toWrite.push(...incoming);
     added = incoming.length;
   } else {
-    const toWrite = [];
     incoming.forEach(n => {
       const cur = state.notes.find(x => x.id === n.id);
       if (!cur) { toWrite.push(n); added++; }
+      // A note hidden here stays hidden: an older plain copy from a backup never replaces it.
+      else if (isHidden(cur) && !isHidden(n)) { /* keep the hidden one */ }
       else if (n.updatedAt > cur.updatedAt) { toWrite.push({ ...cur, ...n }); updated++; }
     });
-    await dbPutMany(toWrite);
+  }
+  // The vault: this device's keys plus the backup's, minus keys no note uses.
+  const after = replace ? incoming : [...state.notes.filter(n => !toWrite.some(w => w.id === n.id)), ...toWrite];
+  const used = new Set(after.filter(isHidden).map(n => n.enc.kid));
+  const meta = sec.meta || inVault ? mergeVault(sec.meta, inVault, used, { replace }) : undefined;
+  await dbWrite(toWrite, meta ?? (sec.meta ? null : undefined), { replace });
+  if (replace) state.notes = incoming;
+  else {
     toWrite.forEach(n => {
       const cur = state.notes.find(x => x.id === n.id);
       if (cur) Object.assign(cur, n); else state.notes.push(n);
     });
   }
+  if (meta?.current !== sec.meta?.current) dropKey();
+  sec.meta = meta ?? null;
   render();
   scheduleReminders();
   scheduleAutoBackup();
-  return { added, updated, total: incoming.length };
+  return { added, updated, total: incoming.length, foreign: foreignKids() };
 }
 $('#import-file').addEventListener('change', async e => {
   const file = e.target.files?.[0];
   e.target.value = '';
   if (!file) return;
   try {
-    const { added, updated } = await importBackup(JSON.parse(await file.text()));
-    toast(added || updated ? `${added} not eklendi, ${updated} not güncellendi` : 'Yedekteki notların hepsi zaten burada');
-  } catch {
-    toast('Bu dosya okunamadı. TakJot’tan indirilen bir .json yedek dosyası seç.');
+    let data;
+    try { data = JSON.parse(await file.text()); } catch { data = null; }
+    if (!data) throw new Error('format');
+    const res = await importBackup(data);
+    toast(res.added || res.updated ? `${res.added} not eklendi, ${res.updated} not güncellendi` : 'Yedekteki notların hepsi zaten burada');
+    afterImport(res);
+  } catch (err) {
+    console.error(err?.name ?? 'import');
+    toast(err?.message === 'format' ? 'Bu dosya okunamadı. TakJot’tan indirilen bir .json yedek dosyası seç.' : 'Notlar yazılamadı, bu cihazdaki notlar olduğu gibi duruyor.');
   }
 });
 
@@ -934,25 +1040,31 @@ const cloudMessage = err => (err instanceof CloudError && CLOUD_MSG[err.code]) |
 // A fingerprint of the notes, to tell whether anything changed since the last backup.
 const notesSignature = () => String(hashStr(JSON.stringify([...state.notes].sort((a, b) => (a.id < b.id ? -1 : 1)))));
 
-/* Dialog with fields. onSubmit(value, fields) may return { error } to stay open and show it,
-   or throw a CloudError, which is shown the same way. Resolves to null when cancelled. */
-function formDialog({ title, html = '', actions, onSubmit, onAction }) {
+/* Dialog with fields. onSubmit(value, fields) may return { error } to stay open and show it
+   ({ error, shake: true } also gives the dialog a short shake), or throw a CloudError, which is
+   shown the same way. Resolves to null when cancelled.
+   onOpen(form, ctl) may return { refresh, cleanup }: refresh runs whenever the fields are enabled
+   again, cleanup when the dialog closes. onAction(act, button, ctl) handles buttons with data-act.
+   ctl: { done(value), error(message), form }. */
+function formDialog({ title, html = '', actions, onSubmit, onAction, onOpen }) {
   const dlg = $('#dlg-cloud');
   const form = $('#cloud-form');
   form.innerHTML = `<h2 id="cloud-title" class="dlg-title">${esc(title)}</h2>${html}<p class="form-error" role="alert" hidden></p>
     <div class="dlg-actions cloud-actions">${actions.map(a => `<button class="btn ${a.kind ?? 'ghost'}" type="submit" value="${esc(a.value)}">${esc(a.label)}</button>`).join('')}</div>`;
   const errEl = form.querySelector('.form-error');
   return new Promise(resolve => {
-    let busy = false; let done = false;
+    let busy = false; let done = false; let hooks = {};
     const finish = v => {
       if (done) return;
       done = true;
-      form.onsubmit = null; form.onclick = null; dlg.oncancel = null;
+      hooks.cleanup?.();
+      form.onsubmit = null; form.onclick = null; form.onkeydown = null; dlg.oncancel = null;
       dlg.close();
       form.innerHTML = ''; // nothing typed (passwords) stays in the page
       resolve(v);
     };
     const showError = msg => { errEl.textContent = msg; errEl.hidden = !msg; };
+    const ctl = { done: finish, error: showError, form };
     form.onsubmit = async e => {
       e.preventDefault();
       if (busy) return;
@@ -976,8 +1088,13 @@ function formDialog({ title, html = '', actions, onSubmit, onAction }) {
       if (done) return;
       form.querySelectorAll('button, input').forEach(el => { el.disabled = false; });
       if (btn && label) btn.textContent = label;
+      hooks.refresh?.();
       if (r?.error) {
         showError(r.error);
+        if (r.shake) {
+          navigator.vibrate?.(40);
+          if (!reduceMotion.matches) dlg.animate([{ translate: '0' }, { translate: '-10px' }, { translate: '9px' }, { translate: '-6px' }, { translate: '3px' }, { translate: '0' }], { duration: 320, easing: 'ease-out' });
+        }
         (form.querySelector('input[type="password"]') ?? btn)?.focus();
         form.querySelector('input[type="password"]')?.select();
         return;
@@ -986,11 +1103,19 @@ function formDialog({ title, html = '', actions, onSubmit, onAction }) {
     };
     form.onclick = e => {
       const b = e.target.closest('button[data-act]');
-      if (b && onAction) onAction(b.dataset.act, b);
+      if (b && onAction && !busy) onAction(b.dataset.act, b, ctl);
+    };
+    // Enter in a field means the main button (the last one), never the first ("Vazgeç").
+    form.onkeydown = e => {
+      if (e.key !== 'Enter' || e.isComposing || !e.target.matches('input:not([type="checkbox"])')) return;
+      e.preventDefault();
+      const main = form.querySelector('.cloud-actions button:last-child');
+      if (main && !main.disabled && !busy) form.requestSubmit(main);
     };
     dlg.oncancel = e => { e.preventDefault(); if (!busy) finish(null); };
     dlg.showModal();
-    (form.querySelector('input') ?? form.querySelector('.btn.primary'))?.focus();
+    hooks = onOpen?.(form, ctl) ?? {};
+    (form.querySelector('input:not(:disabled)') ?? form.querySelector('.btn.primary'))?.focus();
   });
 }
 const CANCEL = { value: 'cancel', label: 'Vazgeç' };
@@ -1318,6 +1443,7 @@ async function restoreFrom(files, pwHint) {
   if (replace && file.id === files[0].id) c.lastHash = notesSignature();
   savePrefs();
   toast(replace ? `${res.added} not geri yüklendi` : (res.added || res.updated ? `${res.added} not eklendi, ${res.updated} not güncellendi` : 'Yedekteki notların hepsi zaten burada'));
+  afterImport(res);
 }
 
 /* Settings: account, password, encryption, automatic backup */
@@ -1452,6 +1578,530 @@ async function maybeAutoBackup() {
   }
 }
 
+/* ---------- Hidden notes (vault.js) ----------
+   A hidden note is kept sealed: in the list, on disk and in backups only its colour, dates, pin and
+   position are readable. Its content is decrypted into a copy (secret: true) only while it is open.
+   The note key lives in memory only, and is dropped when the notes lock. */
+const sec = { meta: null, key: null, hiddenAt: 0, lockTimer: 0 };
+const LOCK_AFTER = { 0: 'Hemen', 30: '30 saniye', 60: '1 dakika', 300: '5 dakika' };
+const lockAfterLabel = () => {
+  const a = state.prefs.secretAfter;
+  return a && LOCK_AFTER[a] ? `${LOCK_AFTER[a]} sonra kilitlenir` : 'arka plana geçince kilitlenir';
+};
+const VISIBLE = ['color', 'pinned', 'archived', 'deletedAt', 'reminderAt', 'reminderFired', 'createdAt', 'updatedAt'];
+function visibleFields(n) {
+  const o = {};
+  VISIBLE.forEach(k => { o[k] = n[k]; });
+  if (Number.isFinite(n.order)) o.order = n.order;
+  return o;
+}
+const SEALED_EMPTY = { type: 'text', title: '', body: '', items: [] };
+
+// The stored form of an open hidden note. The key is taken at once, so a lock that comes
+// while this runs cannot stop the content being sealed.
+async function sealedRecord(n) {
+  const key = sec.key; const kid = sec.meta?.current;
+  const enc = key && kid ? await sealNote(key, kid, n) : null;
+  const cur = state.notes.find(x => x.id === n.id);
+  if (!enc && !isHidden(cur)) throw new VaultError('locked');
+  // Locked meanwhile (an "undo" after the lock, say): the sealed content stays, only the visible fields change.
+  const rec = isHidden(cur) ? cur : { id: n.id };
+  Object.assign(rec, visibleFields(n), SEALED_EMPTY, enc ? { enc } : {});
+  return rec;
+}
+function dropKey() { sec.key = null; state.openSecret = null; }
+function foreignKids() {
+  const cur = sec.meta?.current;
+  return [...new Set(state.notes.filter(n => isHidden(n) && n.enc.kid !== cur).map(n => n.enc.kid))];
+}
+
+/* Wrong passwords: counted on the device (survives a reload); after 5 in a row, waits grow. */
+function noteFail() { state.prefs.secretLock = failedTry(state.prefs.secretLock); savePrefs(); return lockRemaining(state.prefs.secretLock); }
+function clearFails() { if (state.prefs.secretLock) { delete state.prefs.secretLock; savePrefs(); } }
+const waitText = ms => { const s = Math.ceil(ms / 1000); return s >= 60 ? `${Math.ceil(s / 60)} dakika` : `${s} saniye`; };
+const lockedMsg = ms => `Çok fazla yanlış deneme. ${waitText(ms)} sonra tekrar dene.`;
+
+/* Biometric unlock: only with WebAuthn PRF, where the fingerprint or face check makes the
+   authenticator produce a secret that opens the note key. No PRF, no biometric option. */
+let bioSupport = null; // 'yes' | 'maybe' (unknown until tried) | 'no'
+async function checkBio() {
+  if (bioSupport) return bioSupport;
+  let r = 'no';
+  try {
+    if (window.isSecureContext && window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable?.()) {
+      r = 'maybe';
+      const caps = await PublicKeyCredential.getClientCapabilities?.();
+      if (caps && 'extension:prf' in caps) r = caps['extension:prf'] ? 'yes' : 'no';
+    }
+  } catch { r = 'no'; }
+  bioSupport = r;
+  return r;
+}
+const b64url = b64 => b64.replace(/[+/=]/g, c => ({ '+': '-', '/': '_', '=': '' }[c]));
+function forgetCredential(credId) {
+  try { PublicKeyCredential.signalUnknownCredential?.({ rpId: location.hostname, credentialId: b64url(credId) })?.catch?.(() => {}); } catch { /* not supported */ }
+}
+const prfOut = cred => cred?.getClientExtensionResults?.()?.prf?.results?.first;
+function bioGet(credId, prf) {
+  return navigator.credentials.get({ publicKey: {
+    challenge: crypto.getRandomValues(new Uint8Array(32)),
+    rpId: location.hostname,
+    allowCredentials: [{ type: 'public-key', id: fromB64(credId), transports: ['internal'] }],
+    userVerification: 'required', timeout: 60000,
+    extensions: { prf: { eval: { first: fromB64(prf) } } },
+  } });
+}
+// Called straight from a tap: the browser asks for the fingerprint or face.
+async function bioUnlock() {
+  const b = sec.meta.bio;
+  const out = prfOut(await bioGet(b.credId, b.prf));
+  if (!out) throw new VaultError('unsupported');
+  return unwrapWithSecret(b, new Uint8Array(out), sec.meta.keys[b.kid]);
+}
+
+/* Asks for the password of vault key kid. Resolves to { key } or null (cancelled).
+   A right password for the current key also unlocks the session. */
+function askPassword({ kid, title = 'Gizli not', text, action = 'Aç', extractable = false, allowForgot = true, allowBio = true, danger = false, alsoCurrent = false }) {
+  const entry = sec.meta?.keys?.[kid];
+  if (!entry) { toast('Bu notun şifre bilgisi bu cihazda yok. Not olduğu gibi duruyor.'); return Promise.resolve(null); }
+  const bioOk = allowBio && !extractable && kid === sec.meta.current && sec.meta.bio?.kid === kid && bioSupport !== 'no' && !!window.PublicKeyCredential;
+  return formDialog({
+    title,
+    html: `<p class="dlg-text">${esc(text)}</p>
+      <label class="field-label" for="cf-pw">Gizli not şifresi</label>
+      <input id="cf-pw" name="pw" class="field" type="password" autocomplete="current-password" spellcheck="false" autocapitalize="off">
+      ${bioOk ? `<button class="btn outline cloud-extra" type="button" data-act="bio">${icon('finger')}<span>Parmak izi / yüz ile aç</span></button>` : ''}
+      ${allowForgot ? '<button class="gate-link small secret-forgot" type="button" data-act="forgot">Şifremi unuttum</button>' : ''}`,
+    actions: [CANCEL, { value: 'ok', label: action, kind: danger ? 'danger' : 'primary', busy: 'Kontrol ediliyor…' }],
+    onOpen: (form, ctl) => {
+      const input = form.querySelector('#cf-pw');
+      const ok = form.querySelector('button[value="ok"]');
+      let shown = false;
+      const refresh = () => {
+        const left = lockRemaining(state.prefs.secretLock);
+        input.disabled = ok.disabled = left > 0;
+        if (left > 0) { ctl.error(lockedMsg(left)); shown = true; } else if (shown) { shown = false; ctl.error(''); input.focus(); }
+      };
+      refresh();
+      const timer = setInterval(refresh, 1000);
+      return { refresh, cleanup: () => clearInterval(timer) };
+    },
+    onSubmit: async (v, f) => {
+      const left = lockRemaining(state.prefs.secretLock);
+      if (left) return { error: lockedMsg(left) };
+      if (!f.pw) return { error: 'Gizli not şifreni yaz.' };
+      let key;
+      try { key = await unlockEntry(entry, f.pw, { extractable }); } catch (e) {
+        if (e?.code !== 'wrong-password') return { error: 'Şifre bilgisi okunamadı. Notlar olduğu gibi duruyor.' };
+        const wait = noteFail();
+        return { error: wait ? `Şifre yanlış. ${waitText(wait)} beklemen gerekiyor.` : 'Şifre yanlış', shake: true };
+      }
+      clearFails();
+      // Same password on this device too? Then that opens as well, without asking twice.
+      let cur = null;
+      if (alsoCurrent && sec.meta.current && kid !== sec.meta.current && !sec.key) {
+        try { cur = await unlockEntry(sec.meta.keys[sec.meta.current], f.pw); } catch { cur = null; }
+      }
+      return { key, cur };
+    },
+    onAction: (act, btn, ctl) => {
+      if (act === 'forgot') { ctl.done(null); forgotSecret(); return; }
+      if (act !== 'bio') return;
+      let p;
+      try { p = bioUnlock(); } catch (e) { p = Promise.reject(e); }
+      btn.disabled = true;
+      p.then(key => { clearFails(); ctl.done({ key }); }, e => {
+        btn.disabled = false;
+        ctl.error(e?.name === 'NotAllowedError' ? 'Doğrulama yapılmadı. Şifrenle de açabilirsin.' : 'Parmak izi / yüz ile açılamadı. Şifrenle aç.');
+      });
+    },
+  }).then(r => {
+    if (!r?.key) return null;
+    if (kid === sec.meta?.current && !extractable) sec.key = r.key;
+    if (r.cur) sec.key = r.cur;
+    return r;
+  });
+}
+// The current note key: from memory, or by asking for the password.
+async function requireKey(text = 'Gizli notları açmak için gizli not şifreni gir.') {
+  if (sec.key) return sec.key;
+  if (!sec.meta?.current) return null;
+  return (await askPassword({ kid: sec.meta.current, text })) ? sec.key : null;
+}
+// For deleting, restoring and un-hiding: the password is asked even when the notes are open.
+async function confirmSecret({ kid, ...opts }) {
+  const k = kid ?? sec.meta?.current;
+  if (!k) return false;
+  return !!(await askPassword({ ...opts, kid: k, allowForgot: false }));
+}
+
+// Strength bar and the "I understand" box for a new password.
+function newSecretFields() {
+  return `<label class="field-label" for="cf-pw">Şifre</label>
+    <input id="cf-pw" name="pw" class="field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off" aria-describedby="cf-strength cf-pw-hint">
+    <div class="strength" data-score="0" aria-hidden="true"><i></i><i></i><i></i></div>
+    <p id="cf-strength" class="hint strength-label">En az 6 karakter</p>
+    <p id="cf-pw-hint" class="hint">Sadece rakamlı kısa şifre telefon kopyalanırsa kırılabilir. 8+ karakter, harf ve rakam karışık önerilir.</p>
+    <label class="field-label" for="cf-pw2">Şifre (tekrar)</label>
+    <input id="cf-pw2" name="pw2" class="field" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off">
+    <label class="consent-row secret-ack"><input type="checkbox" name="ack" value="1"><span class="consent-box" aria-hidden="true">${icon('check')}</span><span>Şifremi unutursam gizli notlarımın kurtarılamayacağını anlıyorum.</span></label>`;
+}
+function strengthMeter(form) {
+  const pw = form.querySelector('#cf-pw');
+  const bar = form.querySelector('.strength');
+  const label = form.querySelector('.strength-label');
+  const ack = form.querySelector('input[name="ack"]');
+  const ok = form.querySelector('button[value="ok"]');
+  const update = () => {
+    const s = passwordStrength(pw.value);
+    bar.dataset.score = pw.value ? String(s.score) : '0';
+    label.textContent = pw.value ? `Şifre gücü: ${s.label}` : 'En az 6 karakter';
+  };
+  const refresh = () => { ok.disabled = !ack.checked; };
+  pw.addEventListener('input', update);
+  ack.addEventListener('change', refresh);
+  update(); refresh();
+  return { refresh };
+}
+const newSecretError = f => checkSecretPassword(f.pw ?? '')
+  || (f.pw !== f.pw2 ? 'İki şifre aynı değil. İkisini de aynı yaz.' : null)
+  || (!f.ack ? 'Devam etmek için kutuyu işaretle.' : null);
+
+// First hidden note: the password is set here. Nothing is saved until the note itself is sealed.
+async function setupSecret() {
+  const r = await formDialog({
+    title: 'Gizli not şifresi',
+    html: `<p class="dlg-text">Gizli notlar bu şifreyle kilitlenir. Şifre hiçbir yere kaydedilmez; notu açarken sorulur.</p>
+      ${newSecretFields()}
+      <p class="hint">Banka şifresi gibi çok hassas bilgileri not almamanı öneririz.</p>`,
+    actions: [CANCEL, { value: 'ok', label: 'Şifreyi belirle', kind: 'primary', busy: 'Hazırlanıyor…' }],
+    onOpen: strengthMeter,
+    onSubmit: async (v, f) => {
+      const bad = newSecretError(f);
+      if (bad) return { error: bad };
+      return createVault(f.pw);
+    },
+  });
+  if (!r) return null;
+  return { key: r.key, meta: { id: 'vault', current: r.entry.kid, keys: { ...(sec.meta?.keys ?? {}), [r.entry.kid]: r.entry }, bio: null } };
+}
+
+// "Gizli yap": seal, open the sealed text again and compare, and only then replace the plain note.
+async function makeHidden(n) {
+  clearTimeout(saveTimer); saveTimer = null;
+  if (isEmpty(n)) { toast('Boş not gizlenemez. Önce bir şey yaz.'); return; }
+  const created = sec.meta?.current ? null : await setupSecret();
+  if (!sec.meta?.current && !created) return;
+  const key = created?.key ?? await requireKey('Notu gizlemek için gizli not şifreni gir.');
+  if (!key || state.editing !== n) return;
+  const meta = created?.meta ?? sec.meta;
+  n.updatedAt = Date.now();
+  let rec;
+  try {
+    const enc = await sealNote(key, meta.current, n);
+    rec = { id: n.id, ...visibleFields(n), ...SEALED_EMPTY, enc };
+    // One transaction: the vault (first time) and the sealed note, or nothing.
+    await dbWrite([rec], created ? meta : undefined);
+  } catch (err) {
+    console.error(err?.name ?? 'hide');
+    toast('Not gizlenemedi; not olduğu gibi duruyor.');
+    return;
+  }
+  sec.meta = meta;
+  sec.key = key;
+  const i = state.notes.findIndex(x => x.id === n.id);
+  if (i < 0) state.notes.push(rec); else state.notes[i] = rec;
+  if (state.pending?.id === n.id) state.pending = null;
+  n.secret = true;
+  renderEditor();
+  requestPersist();
+  scheduleAutoBackup();
+  toast(state.prefs.cloud.lastBackupAt ? 'Not gizlendi. Önceden alınmış yedeklerde açık hâli durabilir.' : 'Not gizlendi. Listede kilitli görünür.');
+}
+
+// Tapping a hidden note: password (or what is already open), then the editor.
+async function openHidden(n) {
+  if (!sec.meta?.keys?.[n.enc.kid]) { toast('Bu notun şifre bilgisi bu cihazda yok. Not olduğu gibi duruyor.'); return; }
+  if (n.enc.kid !== sec.meta.current) {
+    if (!(await adoptForeign(n.enc.kid))) return;
+    n = state.notes.find(x => x.id === n.id);
+    if (!n) return;
+  }
+  const key = await requireKey();
+  if (!key) return;
+  let content;
+  try { content = await unsealNote(key, n.enc, n.id); } catch {
+    toast('Bu gizli not açılamadı; veri bozulmuş olabilir. Not olduğu gibi duruyor.');
+    return;
+  }
+  const { enc, ...rest } = n;
+  state.openSecret = { ...rest, ...content, secret: true };
+  openNote(n.id);
+}
+
+async function unhideNote(n) {
+  if (!(await confirmSecret({ title: 'Gizliyi kaldır', text: 'Not normal nota döner; içeriği listede ve aramada görünür. Onaylamak için gizli not şifreni gir.', action: 'Gizliyi kaldır' }))) return;
+  if (state.editing !== n) return;
+  clearTimeout(saveTimer); saveTimer = null;
+  delete n.secret;
+  n.updatedAt = Date.now();
+  try { await dbPut(n); } catch (err) {
+    console.error(err?.name ?? 'unhide');
+    n.secret = true;
+    toast('Gizlilik kaldırılamadı; not gizli olarak duruyor.');
+    return;
+  }
+  const i = state.notes.findIndex(x => x.id === n.id);
+  if (i < 0) state.notes.push(n); else state.notes[i] = n;
+  renderEditor();
+  scheduleAutoBackup();
+  toast('Gizlilik kaldırıldı. Not artık normal not.');
+}
+
+// New password: a new key; every hidden note is opened with the old key and sealed with the new one,
+// then all of them and the vault are written in one transaction. Fails anywhere: nothing changes.
+async function changeSecretPassword() {
+  const kid = sec.meta?.current;
+  if (!kid) return;
+  const old = await askPassword({ kid, title: 'Şifreyi değiştir', text: 'Önce şu anki gizli not şifreni gir.', action: 'Devam', allowForgot: false, allowBio: false });
+  if (!old) return;
+  if (state.editing?.secret && saveTimer) await commit();
+  const hadBio = !!sec.meta.bio;
+  const r = await formDialog({
+    title: 'Yeni gizli not şifresi',
+    html: `<p class="dlg-text">Bütün gizli notlar yeni şifreyle yeniden kilitlenir. İşlem yarıda kalırsa notlar eski şifreyle kalır.</p>${newSecretFields()}`,
+    actions: [CANCEL, { value: 'ok', label: 'Şifreyi değiştir', kind: 'primary', busy: 'Notlar kilitleniyor…' }],
+    onOpen: strengthMeter,
+    onSubmit: async (v, f) => {
+      const bad = newSecretError(f);
+      if (bad) return { error: bad };
+      const { entry, key } = await createVault(f.pw);
+      const sealed = new Map();
+      for (const n of state.notes.filter(x => x.enc?.kid === kid)) {
+        const content = await unsealNote(old.key, n.enc, n.id);
+        sealed.set(n.id, await sealNote(key, entry.kid, { id: n.id, ...content }));
+      }
+      const keys = { ...sec.meta.keys, [entry.kid]: entry };
+      delete keys[kid];
+      const meta = { id: 'vault', current: entry.kid, keys, bio: null };
+      const mine = state.notes.filter(x => x.enc?.kid === kid);
+      if (mine.some(x => !sealed.has(x.id))) return { error: 'Notlar değişti; bir daha dene.' };
+      await dbWrite(mine.map(x => ({ ...x, enc: sealed.get(x.id) })), meta);
+      // Written: memory follows at once, so nothing can save with the old key in between.
+      mine.forEach(x => { x.enc = sealed.get(x.id); });
+      if (hadBio) forgetCredential(sec.meta.bio.credId);
+      sec.meta = meta;
+      sec.key = key;
+      return { count: mine.length };
+    },
+  });
+  if (!r) return;
+  scheduleAutoBackup();
+  toast(`Şifre değişti, ${r.count} gizli not yeni şifreyle kilitlendi${hadBio ? '. Parmak izini yeniden kurman gerekir' : ''}`);
+}
+
+// Only the hidden notes go, after the user types SİL. Other notes are not touched.
+async function forgotSecret() {
+  const ids = state.notes.filter(isHidden).map(n => n.id);
+  const r = await formDialog({
+    title: 'Şifremi unuttum',
+    html: `<p class="dlg-text"><strong>Gizli not şifresi kurtarılamaz; biz de kurtaramayız.</strong></p>
+      <p class="dlg-text">Devam edersen bu cihazdaki ${ids.length} gizli not (çöp kutusundakiler dahil) kalıcı olarak silinir. Diğer notlarına dokunulmaz. Sonra yeni bir şifreyle baştan başlayabilirsin.</p>
+      <label class="field-label" for="cf-confirm">Onaylamak için SİL yaz</label>
+      <input id="cf-confirm" name="confirm" class="field" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false">`,
+    actions: [CANCEL, { value: 'ok', label: 'Gizli notları sil', kind: 'danger', busy: 'Siliniyor…' }],
+    onSubmit: async (v, f) => {
+      const word = String(f.confirm ?? '').trim().toLocaleUpperCase('tr');
+      if (word !== 'SİL' && word !== 'SIL') return { error: 'Onaylamak için kutuya SİL yaz.' };
+      await dbWrite([], null, { removeIds: ids });
+      return { value: 'ok' };
+    },
+  });
+  if (!r) return;
+  if (state.editing?.secret) { closeEditor(); location.replace(`#/${state.view}`); }
+  if (sec.meta?.bio) forgetCredential(sec.meta.bio.credId);
+  state.notes = state.notes.filter(n => !ids.includes(n.id));
+  dropKey();
+  sec.meta = null;
+  clearFails();
+  if (state.kind === 'secret') state.kind = 'all';
+  render();
+  scheduleReminders();
+  scheduleAutoBackup();
+  toast(`${ids.length} gizli not silindi. Diğer notların duruyor.`);
+}
+
+// Notes sealed with a key from another device or an older backup: their password opens them once,
+// then they are sealed again with this device's key (one transaction).
+async function adoptForeign(kid) {
+  const mine = () => state.notes.filter(n => n.enc?.kid === kid);
+  const count = mine().length;
+  const r = await askPassword({
+    kid, title: 'Farklı şifreyle kilitli', action: 'Aç', allowForgot: false, allowBio: false, alsoCurrent: true,
+    text: `${count > 1 ? `Bu ${count} not` : 'Bu not'} farklı bir gizli not şifresiyle şifrelenmiş (başka bir cihazdan ya da eski bir yedekten gelmiş). O şifreyi gir; ${count > 1 ? 'notlar' : 'not'} bu cihazdaki şifrene taşınır.`,
+  });
+  if (!r) return false;
+  let key; let curKid;
+  if (!sec.meta.current) { key = r.key; curKid = kid; } else {
+    key = await requireKey('Şimdi bu cihazdaki gizli not şifreni gir; notlar onunla kilitlenecek.');
+    if (!key) return false;
+    curKid = sec.meta.current;
+  }
+  const meta = { ...sec.meta, current: curKid, keys: { ...sec.meta.keys } };
+  try {
+    const sealed = new Map();
+    if (curKid !== kid) {
+      for (const n of mine()) sealed.set(n.id, await sealNote(key, curKid, { id: n.id, ...(await unsealNote(r.key, n.enc, n.id)) }));
+    }
+    const list = mine().filter(n => sealed.has(n.id));
+    if (curKid !== kid && mine().every(n => sealed.has(n.id))) delete meta.keys[kid];
+    await dbWrite(list.map(n => ({ ...n, enc: sealed.get(n.id) })), meta);
+    list.forEach(n => { n.enc = sealed.get(n.id); });
+    sec.meta = meta;
+    sec.key = key;
+    if (list.length) toast(`${list.length} not bu cihazdaki şifreye taşındı`);
+    return true;
+  } catch (err) {
+    console.error(err?.name ?? 'adopt');
+    toast('Notlar taşınamadı; oldukları gibi duruyor.');
+    return false;
+  }
+}
+// After a restore: notes locked with another password stay locked and are not lost; offer to open them.
+async function afterImport(res) {
+  const kids = res?.foreign ?? [];
+  if (!kids.length) return;
+  const count = state.notes.filter(n => isHidden(n) && kids.includes(n.enc.kid)).length;
+  const r = await formDialog({
+    title: 'Farklı şifreli gizli notlar',
+    html: `<p class="dlg-text">Bu notlar farklı bir gizli not şifresiyle şifrelenmiş (${count} not). Notlar kaybolmadı, kilitli duruyorlar.</p>
+      <p class="dlg-text">O şifreyi şimdi girersen notlar bu cihazdaki şifrene taşınır. İstersen sonra kilitli bir nota dokunarak da yapabilirsin.</p>`,
+    actions: [{ value: 'cancel', label: 'Sonra' }, { value: 'ok', label: 'Şifreyi gir', kind: 'primary' }],
+  });
+  if (!r) return;
+  for (const kid of kids) if (!(await adoptForeign(kid))) break;
+  render();
+}
+
+/* Lock: the open hidden note closes, the key leaves memory. Automatic after the app goes to the
+   background (Hemen / 30 sn / 1 dk / 5 dk); while it is away the page is covered. */
+function lockSecrets() {
+  clearTimeout(sec.lockTimer);
+  if (state.editing?.secret) {
+    const fromApp = state.openedFromApp;
+    closeEditor(); // starts its last save with the key still in hand
+    if (fromApp) history.back(); else location.replace(`#/${state.view}`);
+  }
+  dropKey();
+}
+const veilEl = $('#veil');
+function veilOn() { if (sec.key || state.editing?.secret) { veilEl.hidden = false; document.body.classList.add('veiled'); } }
+function veilOff() { veilEl.hidden = true; document.body.classList.remove('veiled'); }
+function onHideLock() {
+  sec.hiddenAt = Date.now();
+  clearTimeout(sec.lockTimer);
+  if (!sec.key && !state.editing?.secret) return;
+  const after = state.prefs.secretAfter || 0;
+  if (!after) lockSecrets(); else sec.lockTimer = setTimeout(lockSecrets, after * 1000);
+}
+function onShowLock() {
+  clearTimeout(sec.lockTimer);
+  // Timers sleep in the background, so the time away is checked again on return.
+  const after = (state.prefs.secretAfter || 0) * 1000;
+  if ((sec.key || state.editing?.secret) && sec.hiddenAt && Date.now() - sec.hiddenAt >= after) lockSecrets();
+  sec.hiddenAt = 0;
+  veilOff();
+}
+
+async function setupBio() {
+  const support = await checkBio();
+  if (support === 'no') { toast('Bu cihazda desteklenmiyor'); return; }
+  const r = await askPassword({ kid: sec.meta.current, title: 'Parmak izi / yüz ile aç', text: 'Kurmak için önce gizli not şifreni gir.', action: 'Devam', extractable: true, allowForgot: false, allowBio: false });
+  if (!r) return;
+  const kid = sec.meta.current;
+  const entry = sec.meta.keys[kid];
+  let made = null;
+  const res = await formDialog({
+    title: 'Parmak izi / yüz ile aç',
+    html: `<p class="dlg-text">Cihazının parmak izi ya da yüz doğrulaması, gizli not anahtarını açan ikinci bir sır üretir. Şifren yine geçerli kalır.</p>
+      <p class="hint">Yalnızca bu cihazda çalışır. Şifreyi değiştirirsen yeniden kurman gerekir.</p>`,
+    actions: [CANCEL, { value: 'ok', label: 'Doğrulamayı başlat', kind: 'primary', busy: 'Bekleniyor…' }],
+    onSubmit: async () => {
+      // Straight from the tap. First the credential, then (if it did not answer yet) one check.
+      let out;
+      try {
+        if (!made) {
+          const prf = crypto.getRandomValues(new Uint8Array(32));
+          const cred = await navigator.credentials.create({ publicKey: {
+            challenge: crypto.getRandomValues(new Uint8Array(32)),
+            rp: { name: 'TakJot', id: location.hostname },
+            user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'TakJot gizli notlar', displayName: 'TakJot gizli notlar' },
+            pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+            authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'preferred' },
+            timeout: 60000, attestation: 'none',
+            extensions: { prf: { eval: { first: prf } } },
+          } });
+          const ext = cred?.getClientExtensionResults?.()?.prf;
+          made = { credId: toB64(new Uint8Array(cred.rawId)), prf: toB64(prf) };
+          if (!ext?.enabled && !ext?.results?.first) { forgetCredential(made.credId); bioSupport = 'no'; return { unsupported: true }; }
+          out = ext.results?.first;
+          if (!out) return { error: 'Bir kez daha doğrula: düğmeye yeniden dokun.' };
+        } else {
+          out = prfOut(await bioGet(made.credId, made.prf));
+          if (!out) { forgetCredential(made.credId); bioSupport = 'no'; return { unsupported: true }; }
+        }
+      } catch (e) {
+        return { error: e?.name === 'NotAllowedError' ? 'Doğrulama yapılmadı. Hazır olduğunda yeniden dene.' : 'Bu cihazda kurulamadı.' };
+      }
+      const box = await wrapWithSecret(r.key, new Uint8Array(out), entry);
+      const meta = { ...sec.meta, bio: { kid, ...made, ...box } };
+      await dbWrite([], meta);
+      sec.meta = meta;
+      bioSupport = 'yes';
+      return { ok: true };
+    },
+  });
+  if (res?.unsupported) {
+    await formDialog({
+      title: 'Bu cihazda desteklenmiyor',
+      html: '<p class="dlg-text">Bu cihaz parmak izi ya da yüz doğrulamasından şifreleme anahtarı üretemiyor (WebAuthn PRF yok). Sadece ekranda sorup kilidi açmak güvenlik sağlamadığı için bu seçenek kapalı kalır. Gizli notları şifrenle açarsın.</p>',
+      actions: [{ value: 'cancel', label: 'Tamam', kind: 'primary' }],
+    });
+  } else if (res?.ok) toast('Parmak izi / yüz ile açma kuruldu');
+}
+async function disableBio() {
+  const m = sec.meta;
+  if (!m?.bio) return;
+  const meta = { ...m, bio: null };
+  try { await dbWrite([], meta); } catch { toast('Ayar kaydedilemedi. Tekrar dene.'); return; }
+  forgetCredential(m.bio.credId);
+  sec.meta = meta;
+  toast('Parmak izi / yüz ile açma kapatıldı');
+}
+
+async function secretSettings() {
+  const support = await checkBio();
+  const m = sec.meta;
+  const hasCur = !!m?.current;
+  const bioOn = !!m?.bio && m.bio.kid === m.current;
+  const count = state.notes.filter(isHidden).length;
+  showSheet('Gizli notlar', [
+    sec.key && { icon: 'lock', label: 'Şimdi kilitle', run: () => { lockSecrets(); toast('Gizli notlar kilitlendi'); } },
+    { icon: 'timer', label: 'Otomatik kilit', sub: state.prefs.secretAfter ? `${LOCK_AFTER[state.prefs.secretAfter] ?? 'Hemen'} sonra` : 'Hemen (arka plana geçince)', run: () => setTimeout(lockAfterMenu, 0) },
+    hasCur && { icon: 'key', label: 'Şifreyi değiştir', run: changeSecretPassword },
+    hasCur && (support === 'no' && !bioOn
+      ? { icon: 'finger', label: 'Parmak izi / yüz ile aç', sub: 'Bu cihazda desteklenmiyor', disabled: true, run: () => {} }
+      : { icon: 'finger', label: 'Parmak izi / yüz ile aç', toggle: bioOn, sub: bioOn ? 'Açık · şifre de geçerli' : 'Kapalı', run: () => (bioOn ? disableBio() : setupBio()) }),
+    { icon: 'trash', label: 'Şifremi unuttum', sub: 'Yalnızca gizli notlar silinir', danger: true, run: forgotSecret },
+  ], { info: `${icon('lock')}<span><small>Gizli notlar</small><b>${count} not · ${sec.key ? 'açık' : 'kilitli'}</b></span>` });
+}
+function lockAfterMenu() {
+  showSheet('Otomatik kilit', Object.entries(LOCK_AFTER).map(([k, label]) => ({
+    icon: 'timer', label: k === '0' ? 'Hemen (arka plana geçince)' : `${label} sonra`, checked: (state.prefs.secretAfter || 0) === Number(k),
+    run: () => { state.prefs.secretAfter = Number(k); savePrefs(); },
+  })));
+}
+
 /* ---------- Theme ---------- */
 function applyTheme() {
   const t = state.prefs.theme;
@@ -1487,6 +2137,11 @@ function mainMenu() {
     },
     { icon: 'cloud-down', label: 'Buluttan geri yükle', run: cloudRestore },
     { icon: 'cloud', label: 'Bulut ayarları', sub: c.connected ? (c.email || 'Google hesabı bağlı') : 'Bağlı değil', run: () => setTimeout(cloudSettings, 0) },
+    (sec.meta || state.notes.some(isHidden)) && {
+      icon: sec.key ? 'unlock' : 'lock', label: 'Gizli notlar',
+      sub: sec.key ? `Açık · ${lockAfterLabel()}` : 'Kilitli', run: () => setTimeout(secretSettings, 0),
+    },
+    sec.key && { icon: 'lock', label: 'Gizli notları şimdi kilitle', run: () => { lockSecrets(); toast('Gizli notlar kilitlendi'); } },
     { icon: 'download', label: 'Yedeği dosya olarak indir', run: exportBackup },
     { icon: 'upload', label: 'Dosyadan geri yükle', run: () => $('#import-file').click() },
     installPrompt && {
@@ -1598,7 +2253,7 @@ $('#view').addEventListener('click', async e => {
   if (open) {
     const n = findNote(open);
     if (!n) return;
-    if (n.deletedAt) trashMenu(n); else openNote(n.id);
+    if (n.deletedAt) trashMenu(n); else if (isHidden(n)) openHidden(n); else openNote(n.id);
     return;
   }
   const day = e.target.closest('[data-day]')?.dataset.day;
@@ -1623,6 +2278,10 @@ $('#view').addEventListener('click', async e => {
       ok: `${trashed.length} notu kalıcı olarak sil`,
     });
     if (!ok) return;
+    // Hidden notes among them: every password they were locked with is asked once.
+    for (const kid of new Set(trashed.filter(isHidden).map(n => n.enc.kid))) {
+      if (!(await confirmSecret({ kid, title: 'Gizli notlar da silinecek', text: 'Çöp kutusunda gizli not var. Onaylamak için gizli not şifreni gir.', action: 'Kalıcı olarak sil', danger: true }))) return;
+    }
     for (const n of trashed) await destroyNote(n.id);
     render();
     toast('Çöp kutusu boşaltıldı');
@@ -1768,7 +2427,13 @@ async function endDrag() {
     drag = null;
     if (d.switched) { state.prefs.sort = d.prevSort; savePrefs(); }
     const n = state.notes.find(x => x.id === d.card.dataset.id);
-    if (!reduceMotion.matches) {
+    if (n && isHidden(n)) {
+      // A hidden note goes to the trash only with its password.
+      d.card.style.translate = '';
+      d.card.classList.remove('lifted', 'to-bin');
+      const ok = await confirmSecret({ kid: n.enc.kid, title: 'Gizli notu sil', text: 'Gizli not çöp kutusuna taşınacak. Onaylamak için gizli not şifreni gir.', action: 'Sil' });
+      if (!ok) { render(); return; }
+    } else if (!reduceMotion.matches) {
       const fade = d.card.animate([{ opacity: 1 }, { opacity: 0, scale: '.6' }], { duration: 160, easing: EASE_OUT, fill: 'forwards' });
       // Never wait on a throttled tab for longer than the animation should take.
       await Promise.race([fade.finished.catch(() => {}), new Promise(r => setTimeout(r, 220))]);
@@ -1800,7 +2465,7 @@ async function saveManualOrder() {
   });
   if (!changed.length) return;
   try { await dbPutMany(changed); requestPersist(); scheduleAutoBackup(); }
-  catch (err) { console.error(err); toast('Sıra kaydedilemedi. Depolama alanını kontrol edip tekrar dene.'); }
+  catch (err) { console.error(err?.name ?? 'order'); toast('Sıra kaydedilemedi. Depolama alanını kontrol edip tekrar dene.'); }
 }
 
 $('#view').addEventListener('pointerdown', e => {
@@ -1850,12 +2515,21 @@ $('#view').addEventListener('click', e => {
 }, true);
 
 function trashMenu(n) {
+  const hidden = isHidden(n);
   showSheet(noteLabel(n), [
-    { icon: 'restore', label: 'Geri yükle', run: async () => { n.deletedAt = null; await saveNote(n, { touch: false }); render(); toast(n.archived ? 'Not arşive geri yüklendi' : 'Not geri yüklendi'); } },
+    {
+      icon: 'restore', label: 'Geri yükle', run: async () => {
+        if (hidden && !(await confirmSecret({ kid: n.enc.kid, title: 'Gizli notu geri yükle', text: 'Gizli not çöp kutusundan çıkacak. Onaylamak için bu notun şifresini gir.', action: 'Geri yükle' }))) return;
+        n = state.notes.find(x => x.id === n.id) ?? n;
+        n.deletedAt = null; await saveNote(n, { touch: false }); render(); toast(n.archived ? 'Not arşive geri yüklendi' : 'Not geri yüklendi');
+      },
+    },
     {
       icon: 'trash', label: 'Kalıcı olarak sil', danger: true,
       run: async () => {
-        const ok = await confirmDialog({ title: 'Not kalıcı olarak silinsin mi?', body: `“${noteLabel(n)}” silinecek. Bu işlem geri alınamaz.`, ok: 'Kalıcı olarak sil' });
+        const ok = hidden
+          ? await confirmSecret({ kid: n.enc.kid, title: 'Kalıcı olarak sil', text: 'Gizli not kalıcı olarak silinecek. Bu işlem geri alınamaz. Onaylamak için bu notun şifresini gir.', action: 'Kalıcı olarak sil', danger: true })
+          : await confirmDialog({ title: 'Not kalıcı olarak silinsin mi?', body: `“${noteLabel(n)}” silinecek. Bu işlem geri alınamaz.`, ok: 'Kalıcı olarak sil' });
         if (!ok) return;
         await destroyNote(n.id);
         render();
@@ -2014,11 +2688,13 @@ document.addEventListener('keydown', e => {
 
 /* ---------- Lifecycle ---------- */
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') commit();
-  else { scheduleReminders(); if (!state.editing) render(); scheduleAutoBackup(); }
+  if (document.visibilityState === 'hidden') { veilOn(); commit(); onHideLock(); }
+  else { onShowLock(); scheduleReminders(); if (!state.editing) render(); scheduleAutoBackup(); }
 });
 window.addEventListener('online', () => scheduleAutoBackup());
-window.addEventListener('pagehide', () => commit());
+window.addEventListener('pagehide', () => { commit(); if (sec.key || state.editing?.secret) { veilOn(); lockSecrets(); } });
+// Back from the browser's page cache: the veil goes, the lock stays.
+window.addEventListener('pageshow', e => { if (e.persisted) veilOff(); });
 
 navigator.serviceWorker?.addEventListener('message', e => {
   if (e.data?.type === 'open' && e.data.id) openNote(e.data.id);
@@ -2028,8 +2704,9 @@ async function init() {
   applyTheme();
   try {
     state.notes = (await dbAll()).map(sanitize).filter(Boolean);
+    sec.meta = sanitizeVault(await dbGetVault());
   } catch (err) {
-    console.error(err);
+    console.error(err?.name ?? 'load');
     toast('Notlar yüklenemedi. Tarayıcı depolamaya izin vermiyor olabilir; gizli sekmede açtıysan normal sekmede dene.');
   }
   // Empty the trash of notes older than the retention window.

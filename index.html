@@ -63,6 +63,9 @@
     <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5M12 14.5v2"/></symbol>
     <symbol id="i-unlock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 6.9-.8M12 14.5v2"/></symbol>
     <symbol id="i-sync" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5"/><path d="M17.8 3.5V7h-3.5M6.2 20.5V17h3.5"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5"/><path d="M11.3 11.8 20 3.5M16.5 7l2.5 2.5M14.2 9.3l2 2"/></symbol>
+    <symbol id="i-timer" viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.5 2M9.5 3h5"/></symbol>
+    <symbol id="i-finger" viewBox="0 0 24 24"><path d="M6.2 8.2A7 7 0 0 1 18.8 11v2.5M5 12v1.2a10 10 0 0 0 1.2 4.8"/><path d="M8.6 18.8A13 13 0 0 1 8 14.5V11a4 4 0 0 1 8 0v3.2a15 15 0 0 0 .8 4.8"/><path d="M12 11v3.5a9 9 0 0 0 1.4 5"/></symbol>
     <symbol id="i-install" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M12 7.5v6.5M9.5 11.5L12 14l2.5-2.5"/></symbol>
     <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.6a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2-2.4 3.6"/><circle cx="12" cy="17" r=".9" class="f"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.5l7 2.8v5.2c0 4.4-3 7.9-7 9-4-1.1-7-4.6-7-9V6.3z"/><path d="M9 12l2.2 2.2L15.3 10"/></symbol>
@@ -181,6 +184,8 @@
 <!-- Shown only while a note is being dragged: drop it here to move it to the trash -->
 <div id="drop-bin" class="drop-bin" aria-hidden="true"><span class="drop-bin-in"><svg class="icon"><use href="#i-trash"/></svg><span>Sil</span></span></div>
 <p id="sr-live" class="visually-hidden" aria-live="assertive"></p>
+<!-- Covers the page while it is in the background with hidden notes open (task switcher) -->
+<div id="veil" class="veil" hidden aria-hidden="true"><span class="veil-mark"><svg class="icon"><use href="#i-lock"/></svg></span></div>
 
 <!-- Google sign-in and cloud consent: full screen, only when a cloud action needs them -->
 <dialog id="dlg-gate" class="gate" aria-labelledby="gate-title">

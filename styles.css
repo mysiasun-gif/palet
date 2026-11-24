@@ -549,6 +549,30 @@ body:has(#fab[hidden]) .tab-gap { display: none; }
 .cloud-extra .icon { width: 20px; height: 20px; }
 .btn:disabled, .cloud-form input:disabled { opacity: .55; cursor: progress; }
 
+/* Hidden notes */
+.card-secret {
+  display: flex; align-items: center; justify-content: center; gap: 8px; margin: auto 0;
+  font-family: var(--hand); font-size: 23px; font-weight: 700; opacity: .72;
+}
+.card-secret .icon { width: 22px; height: 22px; stroke-width: 2.2; }
+.notes.rows .card-secret { justify-content: flex-start; margin: 2px 0; }
+.stamp .icon { width: 14px; height: 14px; stroke-width: 2.4; margin-right: 5px; vertical-align: -2px; }
+.strength { display: flex; gap: 4px; margin-top: 10px; }
+.strength i { flex: 1; height: 5px; border-radius: 4px; background: var(--line); transition: background-color var(--dur) var(--ease); }
+.strength[data-score="1"] i:first-child { background: var(--danger); }
+.strength[data-score="2"] i:nth-child(-n+2) { background: var(--sun); }
+.strength[data-score="3"] i { background: #3F9A62; }
+.strength + .hint { margin-top: 6px; font-weight: 600; }
+.consent-row.secret-ack { margin: 16px 0 4px; font-size: 14.5px; }
+.secret-forgot { align-self: flex-start; padding: 0 4px; margin-top: 6px; }
+.cloud-form .cloud-extra { margin-top: 12px; }
+.sheet-item:disabled { opacity: .55; cursor: default; }
+.veil { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: var(--bg); }
+.veil[hidden] { display: none; }
+.veil-mark { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 4px; background: var(--n-yellow); color: var(--paper-ink); rotate: -3deg; box-shadow: 0 14px 18px -14px rgba(60, 40, 0, .55); }
+.veil-mark .icon { width: 30px; height: 30px; }
+body.veiled dialog { visibility: hidden; }
+
 /* Toast */
 .toast {
   position: fixed; z-index: 30; left: 0; right: 0; margin-inline: auto; width: max-content;
