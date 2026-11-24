@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Aydınlatma Metni · TakJot</title>
+<meta name="theme-color" content="#FAF6EA">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;600;700&family=Quicksand:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script>
+  // Same theme as the app (saved in palet.prefs on this device).
+  try {
+    const t = JSON.parse(localStorage.getItem('palet.prefs') || '{}').theme;
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  } catch { /* storage unavailable */ }
+</script>
+<style>
+  .doc { max-width: 680px; margin: 0 auto; padding: calc(env(safe-area-inset-top, 0px) + 18px) 16px calc(env(safe-area-inset-bottom, 0px) + 40px); }
+  .doc-bar { display: flex; align-items: center; gap: 10px; min-height: 52px; }
+  .doc-bar img { width: 40px; height: 40px; margin-left: -4px; }
+  .doc-bar span { font-family: var(--hand); font-size: 28px; font-weight: 700; line-height: 1; }
+  .doc-back { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; margin-left: auto; padding: 0 14px 0 8px; border-radius: 999px; font-weight: 700; color: var(--ink); text-decoration: none; }
+  .doc-back:active { background: var(--press); }
+  .doc h1 { margin: 28px 0 12px; font-size: 32px; line-height: 1.1; font-weight: 700; letter-spacing: -.02em; }
+  .doc-paper { padding: 22px 20px; border-radius: 4px; background: var(--surface); border: 1px solid var(--line); }
+  .doc-paper p { margin: 0; color: var(--muted); }
+</style>
+</head>
+<body>
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+</svg>
+<main class="doc">
+  <div class="doc-bar">
+    <img src="icons/logo.png" alt="" width="40" height="40"><span>TakJot</span>
+    <a id="back" class="doc-back" href="./#/notes"><svg class="icon" aria-hidden="true"><use href="#i-back"/></svg>Uygulamaya dön</a>
+  </div>
+  <h1>Aydınlatma Metni</h1>
+  <div class="doc-paper">
+    <p>Metin yakında eklenecek.</p>
+  </div>
+</main>
+<script>
+  // Opened from the app menu: go back to where the user was.
+  // Opened in its own tab: close it; if the browser does not allow that, the link opens the app.
+  document.getElementById('back').addEventListener('click', e => {
+    if (history.length <= 1) { window.close(); return; }
+    let sameApp = false;
+    try { sameApp = new URL(document.referrer).origin === location.origin; } catch { /* no referrer */ }
+    if (sameApp) { e.preventDefault(); history.back(); }
+  });
+</script>
+</body>
+</html>

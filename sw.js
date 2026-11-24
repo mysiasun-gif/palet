@@ -1,8 +1,9 @@
 // Palet service worker: offline app shell, cached fonts, reminder notification clicks.
-const VERSION = 'palet-v8';
+const VERSION = 'palet-v9';
 const SHELL = [
   './',
   './index.html',
+  './kvkk.html',
   './styles.css',
   './app.js',
   './cloud.js',
@@ -12,6 +13,8 @@ const SHELL = [
   './icons/maskable-512.png',
   './icons/logo.png',
 ];
+// Standalone pages that open by navigation; any other navigation opens the app.
+const PAGES = ['./kvkk.html'];
 const FONT_CACHE = 'palet-fonts';
 // Google sign-in and Drive: always straight to the network, never cached.
 const GOOGLE_HOSTS = ['accounts.google.com', 'apis.google.com', 'www.googleapis.com'];
@@ -55,7 +58,8 @@ self.addEventListener('fetch', event => {
   // Stale-while-revalidate: open instantly from cache, refresh in the background.
   event.respondWith((async () => {
     const cache = await caches.open(VERSION);
-    const key = req.mode === 'navigate' ? './index.html' : req;
+    // A page navigation opens its own page from the shell (kvkk.html), everything else the app.
+    const key = req.mode === 'navigate' ? (PAGES.find(p => url.pathname.endsWith(p.slice(1))) ?? './index.html') : req;
     const hit = await cache.match(key, { ignoreSearch: req.mode === 'navigate' });
     const network = fetch(req).then(res => {
       if (res.ok && res.type === 'basic') cache.put(key, res.clone());

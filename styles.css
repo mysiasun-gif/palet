@@ -255,7 +255,7 @@ button, [role="button"] { user-select: none; -webkit-user-select: none; -webkit-
 /* A note held for reordering: straightened, lifted off the desk, above its neighbours */
 body.dragging-note { user-select: none; -webkit-user-select: none; cursor: grabbing; }
 body.dragging-note .card.lifted {
-  z-index: 5;
+  z-index: 9; /* above the bin, so the note stays in view over it */
   transform: rotate(0deg) scale(1.04);
   box-shadow: 0 2px 4px rgba(60, 40, 0, .12), 0 28px 32px -18px rgba(60, 40, 0, .6);
 }
@@ -576,6 +576,152 @@ body:has(#fab[hidden]) .tab-gap { display: none; }
   box-shadow: 0 1px 1px rgba(60, 40, 0, .08), 0 6px 10px -8px rgba(60, 40, 0, .5);
 }
 
+/* Drag-to-delete bin: slides up over the bottom bar while a note is held */
+.drop-bin {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 8;
+  height: calc(72px + var(--safe-b)); padding-bottom: var(--safe-b);
+  display: grid; place-items: center;
+  background: var(--bar); color: var(--bar-ink);
+  border-radius: 50% 50% 0 0 / 22px 22px 0 0;
+  transform: translateY(100%); visibility: hidden; pointer-events: none;
+  transition: transform 200ms var(--ease), visibility 0s linear 200ms, background-color 140ms var(--ease);
+}
+body.dragging-note .drop-bin { transform: none; visibility: visible; transition: transform 200ms var(--ease), visibility 0s, background-color 140ms var(--ease); }
+.drop-bin-in {
+  display: inline-flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 22px; border-radius: 999px;
+  border: 1.5px dashed color-mix(in oklab, var(--bar-ink) 45%, transparent);
+  font-size: 16px; font-weight: 700;
+  transition: transform 140ms var(--ease), border-color 140ms var(--ease);
+}
+.drop-bin.over { background: var(--danger); color: var(--bg); }
+/* The new-note button would poke out above the bin */
+body.dragging-note .fab { visibility: hidden; }
+.drop-bin.over .drop-bin-in { transform: scale(1.1); border-color: transparent; }
+body.dragging-note .card.lifted.to-bin { opacity: .8; transform: rotate(0deg) scale(.88); }
+
+/* Sign-in and consent: a full-screen desk with a few notes drifting on it */
+.gate, .onboard {
+  position: fixed; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none;
+  margin: 0; padding: 0; border: 0; overflow: hidden;
+  background: var(--bg); color: var(--ink);
+}
+.gate::backdrop, .onboard::backdrop { background: var(--bg); }
+.gate { overflow-y: auto; overscroll-behavior: contain; }
+.gate[open] { display: grid; padding: calc(var(--safe-t) + 28px) 0 calc(var(--safe-b) + 24px); animation: fade-in 260ms var(--ease); }
+@keyframes fade-in { from { opacity: 0; } }
+.gate-desk {
+  position: fixed; inset: 0; overflow: hidden; pointer-events: none;
+  background-image: radial-gradient(circle, color-mix(in oklab, var(--line), var(--muted) 25%) 1.2px, transparent 1.6px);
+  background-size: 26px 26px;
+  animation: desk-drift 60s linear infinite;
+}
+@keyframes desk-drift { to { background-position: 260px 130px; } }
+.gate-note {
+  position: absolute; left: var(--x); top: var(--y);
+  width: 108px; height: 108px; border-radius: 2px 2px 4px 4px;
+  background: linear-gradient(170deg, color-mix(in oklab, var(--c), #fff var(--sheen)) 0%, var(--c) 60%);
+  box-shadow: 0 1px 1px rgba(60, 40, 0, .08), 0 16px 20px -14px rgba(60, 40, 0, .5);
+  rotate: var(--r);
+  animation: note-float 12s ease-in-out var(--d) infinite alternate;
+}
+.gate-note.small { width: 72px; height: 72px; }
+.gate-note::before {
+  content: ""; position: absolute; top: -9px; left: 50%; width: 52px; height: 18px; margin-left: -26px;
+  background: color-mix(in oklab, var(--t), transparent 25%); rotate: -3deg;
+}
+@keyframes note-float {
+  from { translate: 0 0; }
+  to { translate: 10px -16px; rotate: calc(var(--r) + 3deg); }
+}
+.gate-panel {
+  position: relative; z-index: 1;
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  width: min(400px, calc(100vw - 32px)); margin: auto;
+  padding: 34px 22px 18px; border-radius: 4px;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(60, 40, 0, .1), 0 24px 40px -24px rgba(60, 40, 0, .45);
+}
+.gate-tape {
+  position: absolute; top: -11px; left: 50%; width: 90px; height: 24px; margin-left: -45px; rotate: -2deg;
+  background: repeating-linear-gradient(90deg, rgba(255, 255, 255, .25) 0 4px, transparent 4px 10px), color-mix(in oklab, var(--sun), transparent 20%);
+}
+.gate-logo { width: 72px; height: 72px; margin-bottom: 10px; }
+.gate-title { margin: 0 0 8px; font-size: 27px; line-height: 1.15; font-weight: 700; letter-spacing: -.015em; }
+.gate-sub { margin: 0 0 22px; color: var(--muted); font-size: 15.5px; }
+.btn.google { width: 100%; min-height: 54px; gap: 12px; padding: 0 18px 0 8px; font-size: 16px; background: var(--ink); color: var(--bg); }
+.btn.google:disabled { cursor: progress; }
+.g-badge { display: grid; place-items: center; flex: none; width: 38px; height: 38px; border-radius: 50%; background: #fff; }
+.g-badge svg { width: 20px; height: 20px; }
+.gate-error {
+  width: 100%; margin: 14px 0 0; padding: 10px 12px; border-radius: 12px; text-align: left;
+  background: color-mix(in oklab, var(--danger), transparent 90%); color: var(--ink);
+  font-size: 14.5px; font-weight: 600;
+}
+.gate-link {
+  display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 0 12px; margin-top: 10px;
+  color: var(--ink); font-weight: 700; font-size: 15px;
+  text-decoration: underline; text-decoration-color: var(--sun); text-decoration-thickness: 3px; text-underline-offset: 4px;
+}
+.gate-link.small { margin-top: 0; font-size: 14px; font-weight: 600; color: var(--muted); text-decoration-thickness: 2px; }
+.gate-link:focus-visible { border-radius: 8px; }
+
+.consent-row {
+  display: flex; align-items: flex-start; gap: 12px; width: 100%; margin: 0 0 6px; padding: 14px;
+  border-radius: 16px; border: 1.5px solid var(--line); background: var(--bg);
+  text-align: left; font-size: 15.5px; font-weight: 600; cursor: pointer;
+}
+.consent-row input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.consent-box {
+  flex: none; display: grid; place-items: center; width: 26px; height: 26px; margin-top: 1px;
+  border-radius: 7px; border: 2px solid var(--ink); color: var(--bg);
+}
+.consent-box .icon { width: 18px; height: 18px; stroke-width: 2.6; opacity: 0; }
+.consent-row input:checked + .consent-box { background: var(--ink); }
+.consent-row input:checked + .consent-box .icon { opacity: 1; }
+.consent-row:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.gate-actions { display: flex; gap: 8px; width: 100%; margin-top: 14px; }
+.gate-actions .btn { flex: 1; }
+.btn.primary:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Onboarding: swipeable screens with dots */
+.onboard[open] { display: flex; flex-direction: column; }
+.ob-skip { position: absolute; z-index: 2; top: calc(var(--safe-t) + 10px); right: 12px; min-height: 44px; padding: 0 16px; color: var(--muted); }
+.ob-track {
+  flex: 1; display: flex; overflow-x: auto; overflow-y: hidden;
+  scroll-snap-type: x mandatory; overscroll-behavior-x: contain; scrollbar-width: none;
+}
+.ob-track::-webkit-scrollbar { display: none; }
+.ob-slide {
+  flex: 0 0 100%; scroll-snap-align: center; scroll-snap-stop: always;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+  padding: calc(var(--safe-t) + 64px) 24px 16px; overflow-y: auto;
+}
+.ob-art { width: min(260px, 72vw); height: auto; margin-bottom: 28px; overflow: visible; }
+.ob-title { margin: 0 0 10px; font-size: 28px; line-height: 1.15; font-weight: 700; letter-spacing: -.015em; }
+.ob-text { margin: 0 auto 12px; max-width: 340px; color: var(--muted); font-size: 16.5px; }
+.ob-ink { fill: none; stroke: var(--paper-ink); stroke-width: 3; stroke-linecap: round; opacity: .55; }
+.ob-tape { fill: color-mix(in oklab, var(--sun), transparent 25%); }
+.ob-phone { fill: var(--surface); stroke: var(--ink); stroke-width: 3; }
+.ob-line { fill: none; stroke: var(--ink); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.ob-line.thick { stroke-width: 4.5; }
+.ob-line.light { stroke: var(--bg); }
+.ob-line.dash { stroke-dasharray: 2 7; }
+.ob-lock { fill: var(--ink); }
+.ob-slot { fill: none; stroke: var(--muted); stroke-width: 2; stroke-dasharray: 5 5; opacity: .7; }
+.ob-lifted { filter: drop-shadow(0 10px 8px rgba(60, 40, 0, .28)); }
+.ob-box { fill: none; stroke: var(--paper-ink); stroke-width: 2; opacity: .6; }
+.ob-paper { stroke: var(--line); stroke-width: 1.5; }
+.ob-shield { stroke: var(--ink); stroke-width: 3; stroke-linejoin: round; }
+.ob-shield + .ob-line { stroke: var(--paper-ink); }
+.ob-foot {
+  display: flex; align-items: center; gap: 12px;
+  width: min(520px, 100%); margin: 0 auto; padding: 12px 20px calc(var(--safe-b) + 20px);
+}
+.ob-dots { flex: 1; display: flex; gap: 8px; }
+.ob-dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--line); transition: width 200ms var(--ease), background-color 200ms var(--ease); }
+.ob-dots i.on { width: 24px; border-radius: 4px; background: var(--ink); }
+.ob-next { min-width: 120px; }
+
 /* Hover only where a real pointer can hover; on touch it would stick after a tap */
 @media (hover: hover) and (pointer: fine) {
   .icon-btn:hover, .btn.ghost:hover, .cal-day:hover, .clear-btn:hover,
@@ -591,4 +737,8 @@ body:has(#fab[hidden]) .tab-gap { display: none; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
   /* The held note still follows the finger, but does not grow */
   body.dragging-note .card.lifted { transform: rotate(0deg); }
+  /* The bin only changes colour; the sign-in desk and its notes stand still */
+  .drop-bin.over .drop-bin-in { transform: none; }
+  body.dragging-note .card.lifted.to-bin { transform: rotate(0deg); }
+  .ob-track { scroll-behavior: auto; }
 }

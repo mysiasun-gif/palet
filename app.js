@@ -37,6 +37,8 @@ const PREF_KEY = 'palet.prefs';
 const DEFAULT_PREFS = { layout: 'grid', sort: 'updated', theme: 'system', lastColor: 'yellow' };
 // Cloud settings kept on the device. Never the token or the password: those live only in memory.
 const DEFAULT_CLOUD = { connected: false, email: '', setup: false, encrypt: true, auto: false, lastBackupAt: 0, lastHash: '' };
+// Read before anything is saved: settings from an earlier visit mean this is not a first run.
+const HAD_PREFS = (() => { try { return localStorage.getItem(PREF_KEY) !== null; } catch { return false; } })();
 function loadPrefs() {
   let p;
   try { p = { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREF_KEY) || '{}') }; }
@@ -686,12 +688,12 @@ function convertType() {
   scheduleSave();
 }
 
-async function moveToTrash(n) {
+async function moveToTrash(n, msg = 'Not çöp kutusuna taşındı') {
   const before = { deletedAt: n.deletedAt, pinned: n.pinned };
   n.deletedAt = Date.now();
   n.pinned = false;
   await saveNote(n, { touch: false });
-  toast('Not çöp kutusuna taşındı', {
+  toast(msg, {
     label: 'Geri al',
     run: async () => { Object.assign(n, before); await saveNote(n, { touch: false }); render(); },
   });
@@ -916,7 +918,17 @@ const CLOUD_MSG = {
   notfound: 'Bu yedek artık Drive’da yok. Listeyi yeniden açıp tekrar dene.',
   server: 'Google Drive şu an yanıt vermiyor. Biraz sonra tekrar dene.',
   'weak-password': 'Şifre en az 8 karakter olmalı.',
+  consent: 'Bulut yedeği için önce onay gerekiyor. Buluta kaydet’e dokunup onayı verebilirsin.',
 };
+// The sign-in screen says what to do next, never who is to blame.
+const LOGIN_MSG = {
+  'popup-blocked': 'Google penceresi açılamadı. Tarayıcı açılır pencereyi engellemiş olabilir; bu site için izin verip yeniden dene.',
+  'popup-closed': 'Giriş tamamlanmadı. Hazır olduğunda yeniden “Google ile devam et”e dokun.',
+  network: 'İnternete bağlanılamadı. Bağlantı gelince yeniden dene; notların bu cihazda olduğu gibi duruyor.',
+  denied: 'Google bu hesapla girişe izin vermedi. TakJot şu an deneme aşamasında; yalnızca eklenmiş hesaplar girebiliyor. Başka bir hesapla dene. İzin ekranında Drive kutusu işaretli değilse onu da işaretle.',
+};
+const loginMessage = err => (err instanceof CloudError && LOGIN_MSG[err.code]) || 'Google ile giriş şu an olmadı. Biraz sonra yeniden dene.';
+const hasConsent = () => !!state.prefs.cloudConsentAt;
 const cloudMessage = err => (err instanceof CloudError && CLOUD_MSG[err.code]) || 'Bir şey ters gitti. Notların olduğu gibi duruyor; tekrar dene.';
 
 // A fingerprint of the notes, to tell whether anything changed since the last backup.
@@ -1049,6 +1061,7 @@ async function verifyPassword(pw) {
 // Encrypts this device's notes and uploads them; keeps the newest three backups.
 // Settings and the session password change only after the upload succeeded.
 async function doBackup({ pw, encrypt }) {
+  if (!hasConsent()) throw new CloudError('consent');
   if (state.editing && saveTimer) await commit();
   const sig = notesSignature();
   const env = await encryptBackup(backupData(), encrypt ? pw : null);
@@ -1068,11 +1081,92 @@ async function backupNow(opts) {
 }
 
 function cloudSave() {
-  const c = state.prefs.cloud;
   loadGis().catch(() => {});
-  if (!c.setup) { cloudTask(setupFlow); return; }
-  if (c.encrypt && !sessionPw) { cloudTask(passwordThenBackup); return; }
-  cloudTask(async () => { await ensureToken(); await backupNow({ pw: sessionPw, encrypt: c.encrypt }); });
+  cloudTask(async () => {
+    await cloudGate();
+    const c = state.prefs.cloud;
+    if (!c.setup) return setupFlow();
+    if (c.encrypt && !sessionPw) return passwordThenBackup();
+    await ensureToken();
+    return backupNow({ pw: sessionPw, encrypt: c.encrypt });
+  });
+}
+
+/* Sign-in screen and consent screen. Both live in one full-screen dialog (#dlg-gate).
+   The sign-in uses the same Google flow as everywhere else (connectNow). */
+const gateEl = {
+  dlg: $('#dlg-gate'), login: $('#gate-login'), consent: $('#gate-consent'),
+  google: $('#gate-google'), error: $('#gate-error'), box: $('#consent-box'), ok: $('#consent-ok'),
+};
+let gateDone = null; // resolves the screen that is showing: true = go on, false = not now
+function showGate(panel) {
+  const login = panel === 'login';
+  gateEl.login.hidden = !login;
+  gateEl.consent.hidden = login;
+  gateEl.dlg.setAttribute('aria-labelledby', login ? 'gate-title' : 'consent-title');
+  if (!gateEl.dlg.open) gateEl.dlg.showModal();
+  (login ? gateEl.google : gateEl.box).focus();
+  return new Promise(resolve => { gateDone = resolve; });
+}
+function finishGate(ok) {
+  const r = gateDone;
+  gateDone = null;
+  r?.(ok);
+}
+function closeGate() { if (gateEl.dlg.open) gateEl.dlg.close(); }
+function setGateError(msg) { gateEl.error.textContent = msg; gateEl.error.hidden = !msg; }
+function setGateBusy(busy) {
+  gateEl.google.disabled = busy;
+  gateEl.google.querySelector('.g-label').textContent = busy ? 'Google bekleniyor…' : 'Google ile devam et';
+}
+
+gateEl.google.addEventListener('click', () => {
+  if (gateEl.google.disabled) return;
+  setGateError('');
+  if (navigator.onLine === false) { setGateError(LOGIN_MSG.network); return; }
+  setGateBusy(true);
+  // Straight from the tap, so the browser lets Google's window open.
+  let p;
+  try { p = connectNow(); } catch (e) { p = Promise.reject(e); }
+  p.then(async () => {
+    await noteConnected().catch(() => { state.prefs.cloud.connected = true; savePrefs(); });
+    setGateBusy(false);
+    finishGate(true);
+  }, err => {
+    setGateBusy(false);
+    setGateError(loginMessage(err));
+    gateEl.google.focus();
+  });
+});
+$('#gate-later').addEventListener('click', () => finishGate(false));
+gateEl.box.addEventListener('change', () => { gateEl.ok.disabled = !gateEl.box.checked; });
+gateEl.consent.addEventListener('submit', e => {
+  e.preventDefault();
+  if (!gateEl.box.checked) return;
+  state.prefs.cloudConsentAt = new Date().toISOString();
+  savePrefs();
+  finishGate(true);
+});
+$('#consent-cancel').addEventListener('click', () => finishGate(false));
+// Escape: the same as "Şimdi değil" / "Vazgeç".
+gateEl.dlg.addEventListener('cancel', e => { e.preventDefault(); finishGate(false); });
+
+// Before any cloud backup or restore: a Google session, then consent (asked once).
+async function cloudGate() {
+  try {
+    if (!auth.valid()) {
+      setGateError('');
+      setGateBusy(false);
+      if (!(await showGate('login'))) throw new CloudError('cancelled');
+    }
+    if (!hasConsent()) {
+      gateEl.box.checked = false;
+      gateEl.ok.disabled = true;
+      if (!(await showGate('consent'))) throw new CloudError('cancelled');
+    }
+  } finally {
+    closeGate();
+  }
 }
 
 // First "Buluta kaydet": what happens, the password twice, then Google.
@@ -1082,7 +1176,9 @@ async function setupFlow() {
     html: `<p class="dlg-text">Notların, Google Drive’ında yalnızca TakJot’un görebildiği gizli bir klasöre kaydedilir. Bu yedek Drive listende görünmez.</p>
       <p class="dlg-text">Yedek, gönderilmeden önce bu cihazda belirlediğin şifreyle kilitlenir. Son 3 yedek tutulur.</p>
       ${NO_RECOVERY}${pwFields({ twice: true })}`,
-    actions: [CANCEL, { value: 'ok', label: 'Google ile bağlan ve kaydet', kind: 'primary', busy: 'Google bekleniyor…' }],
+    actions: [CANCEL, auth.valid()
+      ? { value: 'ok', label: 'Şifreyi belirle ve kaydet', kind: 'primary', busy: 'Kaydediliyor…' }
+      : { value: 'ok', label: 'Google ile bağlan ve kaydet', kind: 'primary', busy: 'Google bekleniyor…' }],
     onSubmit: async (v, f) => {
       const bad = newPasswordError(f);
       if (bad) return { error: bad };
@@ -1127,14 +1223,8 @@ async function passwordThenBackup() {
 function cloudRestore() {
   loadGis().catch(() => {});
   cloudTask(async () => {
-    if (!auth.valid()) {
-      if (!state.prefs.cloud.connected) {
-        const ok = await connectDialog('Drive’daki TakJot yedeklerine ulaşmak için yedeği aldığın Google hesabına bağlan.', 'Google ile bağlan', 'Buluttan geri yükle');
-        if (!ok) return;
-      } else {
-        await ensureToken();
-      }
-    }
+    await cloudGate();
+    await ensureToken();
     await noteConnected();
     toast('Yedekler aranıyor…');
     await restoreFrom(await drive.list());
@@ -1153,6 +1243,7 @@ function pickBackup(files) {
 }
 
 async function restoreFrom(files, pwHint) {
+  if (!hasConsent()) throw new CloudError('consent');
   hideToast();
   if (!files.length) {
     await formDialog({
@@ -1243,6 +1334,11 @@ function cloudSettings() {
       : { icon: 'cloud', label: 'Google hesabına bağlan', run: () => cloudTask(async () => { auth.clear(); await ensureToken(); await noteConnected(); toast('Google hesabına bağlandı'); }) },
     { icon: 'lock', label: locked ? 'Yedek şifresini değiştir' : 'Yedek şifresini belirle', run: () => cloudTask(changePassword) },
     locked && { icon: 'unlock', label: 'Şifrelemeyi kapat', danger: true, run: disableEncryption },
+    hasConsent() && {
+      icon: 'shield', label: 'Rızayı geri al ve bağlantıyı kes', danger: true,
+      sub: `Onay tarihi: ${fullWhen(Date.parse(state.prefs.cloudConsentAt) || Date.now())}`,
+      run: withdrawConsent,
+    },
     {
       icon: 'sync', label: 'Otomatik yedek', toggle: c.auto, keep: true,
       sub: c.auto ? 'Açık · uygulama açıkken, günde en fazla bir kez' : 'Kapalı',
@@ -1305,11 +1401,29 @@ async function disconnectCloud() {
   toast('Google bağlantısı kesildi');
 }
 
+// Withdraws cloud consent: the connection is cut and the consent date is removed.
+// Until consent is given again, no backup or restore runs (automatic backup included).
+async function withdrawConsent() {
+  const ok = await confirmDialog({
+    title: 'Rıza geri alınsın mı?',
+    body: 'Google bağlantısı kesilir ve bulut yedeği durur. Drive’daki eski yedeklerin silinmez. Bu cihazdaki notlar olduğu gibi kalır. Yeniden yedek almak istersen onayın tekrar sorulur.',
+    ok: 'Rızayı geri al',
+  });
+  if (!ok) return;
+  auth.revoke();
+  sessionPw = null;
+  state.prefs.cloud = { ...DEFAULT_CLOUD };
+  delete state.prefs.cloudConsentAt;
+  savePrefs();
+  refreshPendingMark();
+  toast('Rıza geri alındı, Google bağlantısı kesildi');
+}
+
 /* Automatic backup: only while the app is open, at most once a day, only after changes,
    and only with a token and password already in memory. Otherwise it waits and says so. */
 function autoState() {
   const c = state.prefs.cloud;
-  if (!c.auto) return 'off';
+  if (!c.auto || !hasConsent()) return 'off';
   if (c.lastHash && notesSignature() === c.lastHash) return 'clean';
   if (Date.now() - (c.lastBackupAt || 0) < AUTO_EVERY) return 'wait';
   if (!c.setup || !auth.valid() || (c.encrypt && !sessionPw) || navigator.onLine === false) return 'pending';
@@ -1379,8 +1493,60 @@ function mainMenu() {
       icon: 'install', label: 'Uygulamayı ana ekrana ekle',
       run: async () => { const ev = installPrompt; installPrompt = null; await ev.prompt(); },
     },
+    { icon: 'help', label: 'Tanıtımı tekrar göster', run: () => showOnboarding() },
+    { icon: 'shield', label: 'Gizlilik ve KVKK', run: () => { location.href = 'kvkk.html'; } },
   ], { brand: true });
 }
+
+/* ---------- Onboarding: four short screens, first run only ---------- */
+const ob = { dlg: $('#dlg-onboard'), track: $('#ob-track'), next: $('#ob-next'), dots: [...$('#ob-dots').children], idx: 0 };
+const obSlides = [...ob.track.children];
+function obSet(i) {
+  ob.idx = i;
+  obSlides.forEach((s, k) => { s.inert = k !== i; });
+  ob.dots.forEach((d, k) => d.classList.toggle('on', k === i));
+  const last = i === obSlides.length - 1;
+  ob.next.textContent = last ? 'Başla' : 'İleri';
+  $('#ob-status').textContent = `Ekran ${i + 1} / ${obSlides.length}: ${obSlides[i].querySelector('.ob-title').textContent}`;
+}
+function obGo(i) {
+  const k = Math.max(0, Math.min(obSlides.length - 1, i));
+  ob.track.scrollTo({ left: k * ob.track.clientWidth, behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+  obSet(k);
+}
+function showOnboarding() {
+  if (ob.dlg.open) return;
+  ob.dlg.showModal();
+  ob.track.scrollLeft = 0;
+  obSet(0);
+  ob.next.focus();
+}
+function finishOnboarding() {
+  state.prefs.onboardingDone = true;
+  savePrefs();
+  if (ob.dlg.open) ob.dlg.close();
+}
+ob.next.addEventListener('click', () => {
+  if (ob.idx >= obSlides.length - 1) finishOnboarding(); else obGo(ob.idx + 1);
+});
+$('#ob-skip').addEventListener('click', finishOnboarding);
+ob.dlg.addEventListener('cancel', e => { e.preventDefault(); finishOnboarding(); });
+// A swipe moves the track; the current screen follows where it settles.
+let obScrollTimer = 0;
+ob.track.addEventListener('scroll', () => {
+  clearTimeout(obScrollTimer);
+  obScrollTimer = setTimeout(() => {
+    const i = Math.round(ob.track.scrollLeft / Math.max(1, ob.track.clientWidth));
+    if (i !== ob.idx) obSet(i);
+  }, 80);
+}, { passive: true });
+ob.dlg.addEventListener('keydown', e => {
+  if (e.target.closest('a')) return;
+  if (e.key === 'ArrowRight') { e.preventDefault(); obGo(ob.idx + 1); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); obGo(ob.idx - 1); }
+});
+// Keep the current screen in place when the window is resized or rotated.
+window.addEventListener('resize', () => { if (ob.dlg.open) ob.track.scrollLeft = ob.idx * ob.track.clientWidth; });
 function sortMenu() {
   showSheet('Sırala', Object.entries(SORTS).map(([k, label]) => ({
     icon: 'sort', label, checked: state.prefs.sort === k,
@@ -1496,15 +1662,34 @@ function tryLift(p, cx, cy) {
   drag = {
     card, box: card.parentElement, pointerId: p.id,
     grabX: cx + scrollX - pos.x, grabY: cy + scrollY - pos.y,
-    cx, cy, raf: 0, renderPending: false, switched: false,
+    cx, cy, raf: 0, renderPending: false, switched: false, prevSort: state.prefs.sort, overBin: false,
   };
   // Starting a drag under another sort switches to manual; what is on screen
   // now becomes the starting order (saved on drop).
   if (state.prefs.sort !== 'manual') { state.prefs.sort = 'manual'; savePrefs(); drag.switched = true; }
   card.classList.add('lifted');
   document.body.classList.add('dragging-note');
+  announce('Silmek için kovaya bırak');
   if (p.type !== 'mouse') navigator.vibrate?.(8);
   drag.raf = requestAnimationFrame(autoScroll);
+}
+
+/* The bin at the bottom of the screen: over it, the note is not reordered; dropped on it, it goes to the trash. */
+const bin = $('#drop-bin');
+function announce(msg) {
+  const el = $('#sr-live');
+  el.textContent = '';
+  setTimeout(() => { el.textContent = msg; }, 30);
+}
+// Where the bin's top edge is once it has slid in (not where it is mid-slide).
+const binTop = () => innerHeight - bin.offsetHeight;
+function updateBin(d) {
+  const over = d.cy >= binTop();
+  if (over === d.overBin) return;
+  d.overBin = over;
+  bin.classList.toggle('over', over);
+  d.card.classList.toggle('to-bin', over);
+  if (over) { navigator.vibrate?.(10); announce('Bırakırsan not çöp kutusuna gider'); }
 }
 
 // Which slot the held note's centre points at, or null when it should stay put.
@@ -1548,7 +1733,8 @@ function moveDrag() {
   const left = d.cx + scrollX - d.grabX;
   const top = d.cy + scrollY - d.grabY;
   let pos = layoutPos(d.card);
-  const idx = findSlot(d, left + pos.w / 2, top + pos.h / 2);
+  updateBin(d);
+  const idx = d.overBin ? null : findSlot(d, left + pos.w / 2, top + pos.h / 2);
   if (idx !== null) { reorder(d, idx); pos = layoutPos(d.card); }
   d.card.style.translate = `${left - pos.x}px ${top - pos.y}px`;
 }
@@ -1558,11 +1744,11 @@ function autoScroll() {
   const d = drag;
   if (!d) return;
   const edge = 72;
-  const tabs = $('.tabs').getBoundingClientRect();
-  const bottom = tabs.top > innerHeight / 2 ? tabs.top : innerHeight;
+  // The bin covers the bottom of the screen while dragging; scrolling starts above it.
+  const bottom = binTop();
   let v = 0;
   if (d.cy < edge) v = (d.cy - edge) / edge;
-  else if (d.cy > bottom - edge) v = (d.cy - (bottom - edge)) / edge;
+  else if (!d.overBin && d.cy > bottom - edge) v = (d.cy - (bottom - edge)) / edge;
   if (v) {
     const y0 = scrollY;
     window.scrollBy(0, Math.max(-1, Math.min(1, v)) * 16);
@@ -1575,10 +1761,25 @@ async function endDrag() {
   const d = drag;
   if (!d) return;
   cancelAnimationFrame(d.raf);
+  bin.classList.remove('over');
+  document.body.classList.remove('dragging-note');
+  if (d.overBin) {
+    // Into the bin: nothing is reordered and the sort stays what it was.
+    drag = null;
+    if (d.switched) { state.prefs.sort = d.prevSort; savePrefs(); }
+    const n = state.notes.find(x => x.id === d.card.dataset.id);
+    if (!reduceMotion.matches) {
+      const fade = d.card.animate([{ opacity: 1 }, { opacity: 0, scale: '.6' }], { duration: 160, easing: EASE_OUT, fill: 'forwards' });
+      // Never wait on a throttled tab for longer than the animation should take.
+      await Promise.race([fade.finished.catch(() => {}), new Promise(r => setTimeout(r, 220))]);
+    }
+    if (n) await moveToTrash(n, 'Çöp kutusuna taşındı');
+    render();
+    return;
+  }
   const [tx = 0, ty = 0] = (d.card.style.translate || '').split(' ').map(parseFloat);
   d.card.style.translate = '';
   d.card.classList.remove('lifted');
-  document.body.classList.remove('dragging-note');
   // Release phase: settle into the slot from wherever the finger let go.
   if (!reduceMotion.matches && (tx || ty)) {
     d.card.animate([{ translate: `${tx}px ${ty}px` }, { translate: '0px 0px' }], { duration: SETTLE_MS, easing: EASE_OUT });
@@ -1843,6 +2044,12 @@ async function init() {
   scheduleReminders();
   refreshPendingMark();
   setInterval(maybeAutoBackup, AUTO_CHECK_MS);
+
+  // First run only. Someone who already has notes or settings has used the app: no tour.
+  if (!state.prefs.onboardingDone) {
+    if (state.notes.length || HAD_PREFS) { state.prefs.onboardingDone = true; savePrefs(); }
+    else showOnboarding();
+  }
 
   if ('serviceWorker' in navigator && window.isSecureContext) {
     navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker kaydedilemedi', err));
